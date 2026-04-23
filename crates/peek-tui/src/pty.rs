@@ -67,11 +67,5 @@ pub fn spawn_shell(shell: &str, cols: u16, rows: u16) -> Result<(RawFd, libc::pi
         libc::close(slave);
     }
 
-    // Set master to non-blocking
-    unsafe {
-        let flags = libc::fcntl(master, libc::F_GETFL);
-        libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
-
     Ok((master, pid))
 }

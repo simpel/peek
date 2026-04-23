@@ -15,19 +15,15 @@ use crate::line_tracker::LineTracker;
 fn main() -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
 
-    // Get current terminal size
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
 
-    // Create PTY and spawn shell
     let (master_fd, child_pid) = pty::spawn_shell(&shell, cols, rows)?;
-    let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
 
-    // Put our terminal into raw mode
+    // Put terminal into raw mode
     terminal::enable_raw_mode().context("failed to enable raw mode")?;
 
-    let result = run_event_loop(&master, cols, rows);
+    let result = run_event_loop(master_fd, rows);
 
-    // Restore terminal
     terminal::disable_raw_mode().ok();
 
     // Wait for child
@@ -39,29 +35,28 @@ fn main() -> Result<()> {
     result
 }
 
-fn run_event_loop(master: &OwnedFd, _cols: u16, rows: u16) -> Result<()> {
-    let master_fd = master.as_raw_fd();
-
+fn run_event_loop(master_fd: libc::c_int, rows: u16) -> Result<()> {
     let dropdown = Arc::new(Mutex::new(Dropdown::new()));
     let line_tracker = Arc::new(Mutex::new(LineTracker::new()));
-    let terminal_rows = Arc::new(Mutex::new(rows));
 
-    // Thread 1: read from PTY master → write to stdout (shell output)
-    let dropdown_clone = dropdown.clone();
-    let line_tracker_clone = line_tracker.clone();
+    let stdin_fd = io::stdin().as_raw_fd();
+
+    // Thread: read from PTY master → write to stdout
+    let dropdown_out = dropdown.clone();
+    let master_fd_copy = master_fd;
     let pty_reader = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut stdout = io::stdout();
         loop {
-            let n = unsafe { libc::read(master_fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+            let n = unsafe { libc::read(master_fd_copy, buf.as_mut_ptr() as *mut _, buf.len()) };
             if n <= 0 {
                 break;
             }
             let data = &buf[..n as usize];
 
-            // Clear dropdown before shell output overwrites it
+            // Clear dropdown before writing shell output
             {
-                let mut dd = dropdown_clone.lock().unwrap();
+                let mut dd = dropdown_out.lock().unwrap();
                 if dd.visible {
                     dd.clear(&mut stdout);
                 }
@@ -70,76 +65,111 @@ fn run_event_loop(master: &OwnedFd, _cols: u16, rows: u16) -> Result<()> {
             stdout.write_all(data).ok();
             stdout.flush().ok();
 
-            // After shell output, re-render dropdown if still relevant
+            // Re-render dropdown after shell output
             {
-                let tracker = line_tracker_clone.lock().unwrap();
-                let mut dd = dropdown_clone.lock().unwrap();
-                if dd.visible && !tracker.current_line().is_empty() {
+                let mut dd = dropdown_out.lock().unwrap();
+                if dd.visible {
                     dd.render(&mut stdout);
+                    stdout.flush().ok();
                 }
             }
         }
     });
 
-    // Thread 2: read from stdin → process or forward to PTY master (user input)
-    let dropdown_clone = dropdown.clone();
-    let line_tracker_clone = line_tracker.clone();
-    let _stdin_reader = std::thread::spawn(move || {
-        let mut stdin = io::stdin();
-        let mut stdout = io::stdout();
-        let mut buf = [0u8; 64];
+    // Thread: handle terminal resize
+    let master_fd_copy = master_fd;
+    let current_rows = Arc::new(Mutex::new(rows));
+    let rows_ref = current_rows.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Ok((new_cols, new_rows)) = terminal::size() {
+            let mut r = rows_ref.lock().unwrap();
+            if *r != new_rows {
+                *r = new_rows;
+                let ws = libc::winsize {
+                    ws_row: new_rows,
+                    ws_col: new_cols,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                unsafe {
+                    libc::ioctl(master_fd_copy, libc::TIOCSWINSZ, &ws);
+                }
+            }
+        }
+    });
 
-        loop {
-            let n = match stdin.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            let data = &buf[..n];
+    // Main thread: read stdin → process or forward to PTY
+    let mut stdout = io::stdout();
+    let mut seq_buf: Vec<u8> = Vec::new();
 
-            let mut dd = dropdown_clone.lock().unwrap();
-            let mut tracker = line_tracker_clone.lock().unwrap();
+    loop {
+        // Use poll to wait for stdin data
+        let mut fds = [libc::pollfd {
+            fd: stdin_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
 
-            if dd.visible {
-                // Check for navigation keys
-                match data {
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 100) };
+        if ret <= 0 {
+            // Check if shell is still alive
+            let mut status: libc::c_int = 0;
+            let w = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if w > 0 {
+                break; // Shell exited
+            }
+            continue;
+        }
+
+        let mut buf = [0u8; 256];
+        let n = unsafe { libc::read(stdin_fd, buf.as_mut_ptr() as *mut _, buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        let data = &buf[..n as usize];
+
+        let mut dd = dropdown.lock().unwrap();
+        let mut tracker = line_tracker.lock().unwrap();
+
+        if dd.visible {
+            // Check for navigation sequences in the input
+            let mut i = 0;
+            while i < data.len() {
+                let remaining = &data[i..];
+                match remaining {
                     // Up arrow: ESC [ A
-                    [0x1b, b'[', b'A'] => {
+                    [0x1b, b'[', b'A', ..] => {
                         dd.move_up();
                         dd.clear(&mut stdout);
                         dd.render(&mut stdout);
                         stdout.flush().ok();
-                        continue;
+                        i += 3;
                     }
                     // Down arrow: ESC [ B
-                    [0x1b, b'[', b'B'] => {
+                    [0x1b, b'[', b'B', ..] => {
                         dd.move_down();
                         dd.clear(&mut stdout);
                         dd.render(&mut stdout);
                         stdout.flush().ok();
-                        continue;
+                        i += 3;
                     }
                     // Tab: accept selection
-                    [0x09] => {
+                    [0x09, ..] => {
                         if let Some(selected) = dd.selected_name() {
                             let selected = selected.to_string();
                             dd.clear(&mut stdout);
                             dd.hide();
+                            stdout.flush().ok();
 
-                            // Delete the current filter text and replace with selection
+                            // Delete filter text and type the selection
                             let filter = tracker.filter_text();
-                            // Send backspaces to delete filter text
                             for _ in 0..filter.len() {
-                                let bs = [0x7f]; // DEL
+                                let bs = [0x08]; // BS
                                 unsafe {
-                                    libc::write(
-                                        master_fd,
-                                        bs.as_ptr() as *const _,
-                                        bs.len(),
-                                    );
+                                    libc::write(master_fd, bs.as_ptr() as *const _, 1);
                                 }
                             }
-                            // Send the selected name
                             unsafe {
                                 libc::write(
                                     master_fd,
@@ -148,34 +178,29 @@ fn run_event_loop(master: &OwnedFd, _cols: u16, rows: u16) -> Result<()> {
                                 );
                             }
                             tracker.replace_filter(&selected);
-                            stdout.flush().ok();
-                            continue;
                         }
+                        i += 1;
                     }
-                    // Escape: dismiss
-                    [0x1b] => {
+                    // Escape (standalone): dismiss dropdown
+                    [0x1b] if remaining.len() == 1 => {
                         dd.clear(&mut stdout);
                         dd.hide();
                         stdout.flush().ok();
-                        continue;
+                        i += 1;
                     }
-                    // Enter: accept and submit
-                    [0x0d] => {
+                    // Enter: accept and run
+                    [0x0d, ..] => {
                         if let Some(selected) = dd.selected_name() {
                             let selected = selected.to_string();
                             dd.clear(&mut stdout);
                             dd.hide();
+                            stdout.flush().ok();
 
-                            // Delete filter and type selection + enter
                             let filter = tracker.filter_text();
                             for _ in 0..filter.len() {
-                                let bs = [0x7f];
+                                let bs = [0x08];
                                 unsafe {
-                                    libc::write(
-                                        master_fd,
-                                        bs.as_ptr() as *const _,
-                                        bs.len(),
-                                    );
+                                    libc::write(master_fd, bs.as_ptr() as *const _, 1);
                                 }
                             }
                             unsafe {
@@ -184,104 +209,98 @@ fn run_event_loop(master: &OwnedFd, _cols: u16, rows: u16) -> Result<()> {
                                     selected.as_ptr() as *const _,
                                     selected.len(),
                                 );
-                            }
-                            // Send enter
-                            let enter = [0x0d];
-                            unsafe {
-                                libc::write(
-                                    master_fd,
-                                    enter.as_ptr() as *const _,
-                                    enter.len(),
-                                );
+                                let enter = [0x0du8];
+                                libc::write(master_fd, enter.as_ptr() as *const _, 1);
                             }
                             tracker.reset();
+                        } else {
+                            // No selection, just forward enter
+                            unsafe {
+                                libc::write(master_fd, data[i..i + 1].as_ptr() as *const _, 1);
+                            }
+                            tracker.reset();
+                        }
+                        i += 1;
+                    }
+                    // Any other byte: forward to shell and update tracker
+                    _ => {
+                        unsafe {
+                            libc::write(master_fd, data[i..i + 1].as_ptr() as *const _, 1);
+                        }
+                        tracker.feed(&data[i..i + 1]);
+                        i += 1;
+
+                        // Update dropdown with new filter
+                        let line = tracker.current_line();
+                        if let Some((_tool, _filter)) = peek_core::tools::match_tool_prefix(&line)
+                        {
+                            drop(tracker);
+                            drop(dd);
+                            if let Ok(suggestions) = query_daemon(&line) {
+                                let mut dd = dropdown.lock().unwrap();
+                                if !suggestions.is_empty() {
+                                    dd.update(suggestions);
+                                    dd.clear(&mut stdout);
+                                    dd.render(&mut stdout);
+                                } else {
+                                    dd.clear(&mut stdout);
+                                    dd.hide();
+                                }
+                                stdout.flush().ok();
+                            }
+                            // Re-acquire locks for next iteration
+                            dd = dropdown.lock().unwrap();
+                            tracker = line_tracker.lock().unwrap();
+                        } else {
+                            dd.clear(&mut stdout);
+                            dd.hide();
                             stdout.flush().ok();
-                            continue;
                         }
                     }
-                    _ => {}
                 }
             }
-
-            // Forward input to shell
+        } else {
+            // No dropdown visible: forward everything to shell, track input
             unsafe {
                 libc::write(master_fd, data.as_ptr() as *const _, data.len());
             }
-
-            // Update line tracker
             tracker.feed(data);
 
-            // Check if we should show/update dropdown
             let line = tracker.current_line();
-            drop(tracker); // release lock before querying daemon
-            drop(dd);
-
             if let Some((_tool, _filter)) = peek_core::tools::match_tool_prefix(&line) {
-                // Query the daemon
+                drop(tracker);
+                drop(dd);
                 if let Ok(suggestions) = query_daemon(&line) {
-                    let mut dd = dropdown_clone.lock().unwrap();
+                    let mut dd = dropdown.lock().unwrap();
                     if !suggestions.is_empty() {
                         dd.update(suggestions);
-                        dd.clear(&mut stdout);
                         dd.render(&mut stdout);
-                    } else {
-                        dd.clear(&mut stdout);
-                        dd.hide();
-                    }
-                    stdout.flush().ok();
-                }
-            } else {
-                let mut dd = dropdown_clone.lock().unwrap();
-                if dd.visible {
-                    dd.clear(&mut stdout);
-                    dd.hide();
-                    stdout.flush().ok();
-                }
-            }
-        }
-    });
-
-    // Handle SIGWINCH (terminal resize)
-    let master_raw = master.as_raw_fd();
-    let rows_clone = terminal_rows.clone();
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if let Ok((new_cols, new_rows)) = terminal::size() {
-                let mut rows = rows_clone.lock().unwrap();
-                if *rows != new_rows {
-                    *rows = new_rows;
-                    // Forward resize to PTY
-                    let ws = libc::winsize {
-                        ws_row: new_rows,
-                        ws_col: new_cols,
-                        ws_xpixel: 0,
-                        ws_ypixel: 0,
-                    };
-                    unsafe {
-                        libc::ioctl(master_raw, libc::TIOCSWINSZ, &ws);
+                        stdout.flush().ok();
                     }
                 }
             }
         }
-    });
+    }
 
     pty_reader.join().ok();
-    // stdin_reader will end when shell exits
-
     Ok(())
 }
-
 
 fn query_daemon(line: &str) -> Result<Vec<(String, String)>> {
     let cwd = std::env::current_dir()?.to_string_lossy().to_string();
 
-    let socket_path = dirs_socket_path();
+    let socket_path = dirs::home_dir()
+        .expect("no home dir")
+        .join(".peek")
+        .join("peek.sock");
+
     if !socket_path.exists() {
         return Ok(vec![]);
     }
 
     let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(100)))?;
+
     let request = peek_core::protocol::Request::Suggest {
         cwd,
         line: line.to_string(),
@@ -291,25 +310,16 @@ fn query_daemon(line: &str) -> Result<Vec<(String, String)>> {
     json.push('\n');
     stream.write_all(json.as_bytes())?;
 
-    let mut reader = std::io::BufReader::new(stream);
+    let mut reader = io::BufReader::new(stream);
     let mut response_line = String::new();
-    std::io::BufRead::read_line(&mut reader, &mut response_line)?;
+    io::BufRead::read_line(&mut reader, &mut response_line)?;
 
     let response: peek_core::protocol::Response = serde_json::from_str(response_line.trim())?;
     match response {
-        peek_core::protocol::Response::Suggestions { suggestions, .. } => {
-            Ok(suggestions
-                .into_iter()
-                .map(|s| (s.name, s.preview))
-                .collect())
-        }
+        peek_core::protocol::Response::Suggestions { suggestions, .. } => Ok(suggestions
+            .into_iter()
+            .map(|s| (s.name, s.preview))
+            .collect()),
         _ => Ok(vec![]),
     }
-}
-
-fn dirs_socket_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .expect("no home dir")
-        .join(".peek")
-        .join("peek.sock")
 }
