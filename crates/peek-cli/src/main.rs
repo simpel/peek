@@ -53,6 +53,40 @@ enum Commands {
     History,
     /// Clear frecency data
     ClearHistory,
+
+    /// (Internal) Query suggestions — used by shell integration
+    #[command(name = "_suggest", hide = true)]
+    InternalSuggest {
+        /// Current working directory
+        #[arg(long)]
+        cwd: String,
+        /// Current command line
+        #[arg(long)]
+        line: String,
+        /// Cursor position
+        #[arg(long)]
+        cursor: usize,
+    },
+    /// (Internal) Notify directory change — used by shell integration
+    #[command(name = "_cd", hide = true)]
+    InternalCd {
+        /// New working directory
+        #[arg(long)]
+        cwd: String,
+    },
+    /// (Internal) Record command execution — used by shell integration
+    #[command(name = "_executed", hide = true)]
+    InternalExecuted {
+        /// Current working directory
+        #[arg(long)]
+        cwd: String,
+        /// Command that was run
+        #[arg(long)]
+        command: String,
+        /// Tool name
+        #[arg(long)]
+        tool: String,
+    },
 }
 
 fn send_request(request: &Request) -> Result<Response> {
@@ -216,6 +250,23 @@ fn main() -> Result<()> {
             } else {
                 println!("No history to clear");
             }
+        }
+
+        Commands::InternalSuggest { cwd, line, cursor } => {
+            let request = Request::Suggest { cwd, line, cursor };
+            if let Ok(response) = send_request(&request) {
+                // Output raw JSON for shell scripts to parse
+                let json = serde_json::to_string(&response)?;
+                println!("{json}");
+            }
+        }
+
+        Commands::InternalCd { cwd } => {
+            let _ = send_request(&Request::Cd { cwd });
+        }
+
+        Commands::InternalExecuted { cwd, command, tool } => {
+            let _ = send_request(&Request::Executed { cwd, command, tool });
         }
     }
 

@@ -3,7 +3,6 @@
 # Source via: eval "$(peek init zsh)"
 
 # --- Configuration ---
-PEEK_SOCKET="${HOME}/.peek/peek.sock"
 PEEK_TRIGGER="${PEEK_TRIGGER:-auto}"
 PEEK_MAX_HEIGHT=8
 
@@ -15,24 +14,12 @@ _peek_visible=0
 _peek_dropdown_height=0
 
 # --- Communication ---
-_peek_query() {
-  local request="$1"
-  if [[ ! -S "$PEEK_SOCKET" ]]; then
-    return 1
-  fi
-  echo "$request" | socat - UNIX-CONNECT:"$PEEK_SOCKET" 2>/dev/null
+_peek_suggest() {
+  peek _suggest --cwd "$1" --line "$2" --cursor "$3" 2>/dev/null
 }
 
 _peek_ensure_daemon() {
-  if [[ ! -S "$PEEK_SOCKET" ]]; then
-    peekd &>/dev/null &
-    disown
-    local i=0
-    while [[ ! -S "$PEEK_SOCKET" ]] && (( i < 10 )); do
-      sleep 0.05
-      (( i++ ))
-    done
-  fi
+  peek start &>/dev/null
 }
 
 # --- Dropdown Rendering ---
@@ -94,13 +81,8 @@ _peek_render_dropdown() {
 
 # --- Suggestion Fetching ---
 _peek_fetch_suggestions() {
-  local cwd="$PWD"
-  local line="$BUFFER"
-  local cursor="$CURSOR"
-
-  local request="{\"type\":\"suggest\",\"cwd\":\"$cwd\",\"line\":\"$line\",\"cursor\":$cursor}"
   local response
-  response=$(_peek_query "$request") || return
+  response=$(_peek_suggest "$PWD" "$BUFFER" "$CURSOR") || return
 
   _peek_suggestions=()
   _peek_previews=()
@@ -239,7 +221,7 @@ fi
 
 # --- Directory Change Hook ---
 _peek_chpwd() {
-  _peek_query "{\"type\":\"cd\",\"cwd\":\"$PWD\"}" &>/dev/null &
+  peek _cd --cwd "$PWD" &>/dev/null &
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook chpwd _peek_chpwd
@@ -253,7 +235,7 @@ _peek_preexec() {
       local rest="${cmd#$p}"
       local command="${rest%% *}"
       local tool="${p%% *}"
-      _peek_query "{\"type\":\"executed\",\"cwd\":\"$PWD\",\"command\":\"$command\",\"tool\":\"$tool\"}" &>/dev/null &
+      peek _executed --cwd "$PWD" --command "$command" --tool "$tool" &>/dev/null &
       break
     fi
   done
