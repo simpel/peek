@@ -25,16 +25,23 @@ fn main() -> Result<()> {
         let mut status: libc::c_int = 0;
         libc::waitpid(child_pid, &mut status, 0);
     }
-
     result
+}
+
+/// All suggestions from the daemon for the current directory + tool.
+/// Cached so we only query once per tool prefix detection.
+struct SuggestionCache {
+    tool_prefix: String,
+    all_items: Vec<(String, String)>,
 }
 
 fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
     let dd = Arc::new(Mutex::new(TuiDropdown::new()));
     let tracker = Arc::new(Mutex::new(LineTracker::new()));
+    let cache: Arc<Mutex<Option<SuggestionCache>>> = Arc::new(Mutex::new(None));
     let stdin_fd = io::stdin().as_raw_fd();
 
-    // Thread: PTY output → stdout (pass-through, but pause for dropdown redraws)
+    // Thread: PTY output → stdout
     let dd_out = dd.clone();
     let pty_reader = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -50,10 +57,8 @@ fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
             if d.visible {
                 d.clear(&mut stdout);
             }
-
             stdout.write_all(data).ok();
             stdout.flush().ok();
-
             if d.visible {
                 d.render(&mut stdout);
             }
@@ -70,10 +75,8 @@ fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
                 if size != last {
                     last = size;
                     let ws = libc::winsize {
-                        ws_row: size.1,
-                        ws_col: size.0,
-                        ws_xpixel: 0,
-                        ws_ypixel: 0,
+                        ws_row: size.1, ws_col: size.0,
+                        ws_xpixel: 0, ws_ypixel: 0,
                     };
                     unsafe { libc::ioctl(mfd, libc::TIOCSWINSZ, &ws); }
                 }
@@ -81,16 +84,12 @@ fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
         }
     });
 
-    // Main loop: stdin → process or forward to PTY
     let mut stdout = io::stdout();
 
     loop {
         let mut fds = [libc::pollfd {
-            fd: stdin_fd,
-            events: libc::POLLIN,
-            revents: 0,
+            fd: stdin_fd, events: libc::POLLIN, revents: 0,
         }];
-
         let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 100) };
         if ret <= 0 {
             let mut status: libc::c_int = 0;
@@ -115,28 +114,24 @@ fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
             while i < data.len() {
                 let rest = &data[i..];
                 match rest {
-                    // Up arrow
                     [0x1b, b'[', b'A', ..] => {
                         d.move_up();
                         d.clear(&mut stdout);
                         d.render(&mut stdout);
                         i += 3;
                     }
-                    // Down arrow
                     [0x1b, b'[', b'B', ..] => {
                         d.move_down();
                         d.clear(&mut stdout);
                         d.render(&mut stdout);
                         i += 3;
                     }
-                    // Tab: accept selection
                     [0x09, ..] => {
                         if let Some(name) = d.selected_name() {
                             let name = name.to_string();
                             d.clear(&mut stdout);
                             d.hide();
                             stdout.flush().ok();
-
                             let filter = t.filter_text();
                             send_backspaces(master_fd, filter.len());
                             send_text(master_fd, &name);
@@ -144,21 +139,18 @@ fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
                         }
                         i += 1;
                     }
-                    // Escape
                     [0x1b] if rest.len() == 1 => {
                         d.clear(&mut stdout);
                         d.hide();
                         stdout.flush().ok();
                         i += 1;
                     }
-                    // Enter: accept and run
                     [0x0d, ..] => {
                         if let Some(name) = d.selected_name() {
                             let name = name.to_string();
                             d.clear(&mut stdout);
                             d.hide();
                             stdout.flush().ok();
-
                             let filter = t.filter_text();
                             send_backspaces(master_fd, filter.len());
                             send_text(master_fd, &name);
@@ -167,39 +159,88 @@ fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
                             send_byte(master_fd, 0x0d);
                         }
                         t.reset();
+                        *cache.lock().unwrap() = None;
                         i += 1;
                     }
-                    // Other keys: forward + update suggestions
                     _ => {
+                        // Forward keystroke immediately — no lag
                         send_bytes(master_fd, &data[i..i + 1]);
                         t.feed(&data[i..i + 1]);
                         i += 1;
 
+                        // Filter locally from cache — instant
                         let line = t.current_line();
-                        if peek_core::tools::match_tool_prefix(&line).is_some() {
-                            drop(t);
-                            drop(d);
-                            refresh_suggestions(&line, &dd, &mut stdout);
-                            d = dd.lock().unwrap();
-                            t = tracker.lock().unwrap();
+                        if let Some((_tool, filter)) = peek_core::tools::match_tool_prefix(&line) {
+                            let c = cache.lock().unwrap();
+                            if let Some(ref sc) = *c {
+                                let filtered = fuzzy_filter(&sc.all_items, filter);
+                                if !filtered.is_empty() {
+                                    d.clear(&mut stdout);
+                                    d.update(filtered);
+                                    d.render(&mut stdout);
+                                } else {
+                                    d.clear(&mut stdout);
+                                    d.hide();
+                                    stdout.flush().ok();
+                                }
+                            }
                         } else {
                             d.clear(&mut stdout);
                             d.hide();
                             stdout.flush().ok();
+                            *cache.lock().unwrap() = None;
                         }
                     }
                 }
             }
         } else {
-            // No dropdown: forward all input, track typing
+            // No dropdown visible: forward all input, track
             send_bytes(master_fd, data);
             t.feed(data);
 
             let line = t.current_line();
-            if peek_core::tools::match_tool_prefix(&line).is_some() {
-                drop(t);
-                drop(d);
-                refresh_suggestions(&line, &dd, &mut stdout);
+            if let Some((tool, filter)) = peek_core::tools::match_tool_prefix(&line) {
+                let needs_fetch = {
+                    let c = cache.lock().unwrap();
+                    match &*c {
+                        Some(sc) => sc.tool_prefix != tool.command_prefix(),
+                        None => true,
+                    }
+                };
+
+                if needs_fetch {
+                    // Fetch from daemon (only happens once per tool switch)
+                    drop(t);
+                    drop(d);
+                    if let Ok(items) = query_daemon(&line) {
+                        *cache.lock().unwrap() = Some(SuggestionCache {
+                            tool_prefix: tool.command_prefix().to_string(),
+                            all_items: items.clone(),
+                        });
+                        let filtered = fuzzy_filter(&items, filter);
+                        let mut d = dd.lock().unwrap();
+                        if !filtered.is_empty() {
+                            d.update(filtered);
+                            d.render(&mut stdout);
+                        }
+                    }
+                } else {
+                    // Filter from cache
+                    let c = cache.lock().unwrap();
+                    if let Some(ref sc) = *c {
+                        let filtered = fuzzy_filter(&sc.all_items, filter);
+                        if !filtered.is_empty() {
+                            d.clear(&mut stdout);
+                            d.update(filtered);
+                            d.render(&mut stdout);
+                        }
+                    }
+                }
+            } else {
+                // Not a tool prefix — clear cache if user started fresh
+                if t.current_line().is_empty() {
+                    *cache.lock().unwrap() = None;
+                }
             }
         }
     }
@@ -208,19 +249,19 @@ fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
     Ok(())
 }
 
-fn refresh_suggestions(line: &str, dd: &Arc<Mutex<TuiDropdown>>, stdout: &mut io::Stdout) {
-    if let Ok(suggestions) = query_daemon(line) {
-        let mut d = dd.lock().unwrap();
-        if !suggestions.is_empty() {
-            d.clear(stdout);
-            d.update(suggestions);
-            d.render(stdout);
-        } else {
-            d.clear(stdout);
-            d.hide();
-            stdout.flush().ok();
-        }
+/// Filter items locally using fuzzy matching.
+fn fuzzy_filter(items: &[(String, String)], filter: &str) -> Vec<(String, String)> {
+    if filter.is_empty() {
+        return items.to_vec();
     }
+
+    let candidates: Vec<&str> = items.iter().map(|(n, _)| n.as_str()).collect();
+    let matches = peek_core::fuzzy::fuzzy_match(filter, &candidates);
+
+    matches
+        .iter()
+        .map(|m| items[m.index].clone())
+        .collect()
 }
 
 fn send_bytes(fd: libc::c_int, data: &[u8]) {
@@ -243,7 +284,6 @@ fn send_backspaces(fd: libc::c_int, count: usize) {
 
 fn query_daemon(line: &str) -> Result<Vec<(String, String)>> {
     let cwd = std::env::current_dir()?.to_string_lossy().to_string();
-
     let socket_path = dirs::home_dir()
         .expect("no home dir")
         .join(".peek")
