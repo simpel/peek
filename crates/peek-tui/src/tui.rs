@@ -66,13 +66,19 @@ impl TuiDropdown {
             return;
         }
         let n = self.rendered_lines;
-        // Move cursor down, clearing each line
-        let mut buf = String::with_capacity(n * 10);
+        let mut buf = String::with_capacity(n * 12);
+
+        // Save cursor (DEC — tracks scroll correctly)
+        buf.push_str("\x1b7");
+
+        // Move down and clear each rendered line
         for _ in 0..n {
             buf.push_str("\r\n\x1b[2K");
         }
-        // Move back up
-        buf.push_str(&format!("\x1b[{}A\r", n));
+
+        // Restore cursor to original position
+        buf.push_str("\x1b8");
+
         w.write_all(buf.as_bytes()).ok();
         w.flush().ok();
         self.rendered_lines = 0;
@@ -84,19 +90,23 @@ impl TuiDropdown {
         }
 
         let count = self.items.len().min(MAX_VISIBLE);
-        let total_lines = count + 2; // top border + items + bottom border
+        let total_lines = count + 2;
         let border: String = "-".repeat(INNER_W);
 
         let mut buf = String::with_capacity(2048);
 
-        // First: scroll to ensure space below cursor.
-        // Print newlines to create room, then move back up.
+        // Save cursor position
+        buf.push_str("\x1b7");
+
+        // Scroll to create space: print newlines then come back
         for _ in 0..total_lines {
             buf.push('\n');
         }
-        buf.push_str(&format!("\x1b[{}A", total_lines));
+        // Restore cursor (now adjusted for scroll)
+        buf.push_str("\x1b8");
+        // Save again at the scroll-adjusted position
+        buf.push_str("\x1b7");
 
-        // Now render each line below the cursor.
         // Top border
         buf.push_str(&format!("\r\n\x1b[2K \x1b[90m+{}+\x1b[0m", border));
 
@@ -123,8 +133,8 @@ impl TuiDropdown {
         // Bottom border
         buf.push_str(&format!("\r\n\x1b[2K \x1b[90m+{}+\x1b[0m", border));
 
-        // Move cursor back up to original position
-        buf.push_str(&format!("\x1b[{}A\r", total_lines));
+        // Restore cursor to where typing continues
+        buf.push_str("\x1b8");
 
         self.rendered_lines = total_lines;
 
