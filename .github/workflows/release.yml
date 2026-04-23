@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action/setup@v1
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          cp "target/${TARGET}/release/peek" dist/
+          cp "target/${TARGET}/release/peekd" dist/
+          cp "target/${TARGET}/release/peek-wrap" dist/
+          cp assets/com.peek.daemon.plist dist/
+          tar -czf "peek-${TARGET}.tar.gz" -C dist .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peek-${{ matrix.target }}
+          path: peek-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            peek-aarch64-apple-darwin/peek-aarch64-apple-darwin.tar.gz \
+            peek-x86_64-apple-darwin/peek-x86_64-apple-darwin.tar.gz
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+
+          curl -sL "https://github.com/simpel/peek/releases/download/${TAG}/peek-aarch64-apple-darwin.tar.gz" -o arm64.tar.gz
+          SHA_ARM64=$(sha256sum arm64.tar.gz | cut -d' ' -f1)
+
+          curl -sL "https://github.com/simpel/peek/releases/download/${TAG}/peek-x86_64-apple-darwin.tar.gz" -o x86_64.tar.gz
+          SHA_X86=$(sha256sum x86_64.tar.gz | cut -d' ' -f1)
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/simpel/homebrew-tap.git"
+          cd homebrew-peek
+
+          mkdir -p Formula
+          cat > Formula/peek.rb << FORMULA
+          class Peek < Formula
+            desc "Inline shell autocomplete daemon for package scripts and tools"
+            homepage "https://github.com/simpel/peek"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/simpel/peek/releases/download/v${VERSION}/peek-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_ARM64}"
+              else
+                url "https://github.com/simpel/peek/releases/download/v${VERSION}/peek-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_X86}"
+              end
+            end
+
+            def install
+              bin.install "peek"
+              bin.install "peekd"
+              bin.install "peek-wrap"
+              prefix.install "com.peek.daemon.plist"
+            end
+
+            service do
+              run [opt_bin/"peekd"]
+              keep_alive true
+              log_path var/"log/peek.log"
+              error_log_path var/"log/peek.log"
+            end
+
+            def caveats
+              <<~EOS
+                To start the peek daemon:
+                  brew services start peek
+
+                To use inline completions, run your shell through peek-wrap:
+                  peek-wrap
+
+                Or add to your terminal's shell command setting.
+              EOS
+            end
+
+            test do
+              assert_match "Inline shell autocomplete", shell_output("#{bin}/peek --help")
+            end
+          end
+          FORMULA
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/peek.rb
+          git commit -m "Update peek to ${VERSION}"
+          git push
