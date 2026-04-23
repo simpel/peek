@@ -27,6 +27,7 @@ impl OverlayProcess {
         items: &[(String, String)],
         selected: usize,
         cursor_col: usize,
+        cursor_row: usize,
         term_rows: u16,
         term_cols: u16,
     ) {
@@ -45,6 +46,7 @@ impl OverlayProcess {
             "items": items_json,
             "selected": selected,
             "cursorCol": cursor_col,
+            "cursorRow": cursor_row,
             "terminalRows": term_rows,
             "terminalCols": term_cols,
         });

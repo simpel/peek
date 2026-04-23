@@ -7,7 +7,8 @@ struct OverlayCommand: Codable {
     let action: String
     let items: [SuggestionItem]?
     let selected: Int?
-    let cursorCol: Int?     // cursor column in the terminal
+    let cursorCol: Int?     // cursor column in the terminal (1-based)
+    let cursorRow: Int?     // cursor row in the terminal (1-based)
     let terminalRows: Int?  // total terminal rows
     let terminalCols: Int?  // total terminal columns
 }
@@ -130,15 +131,17 @@ class OverlayWindowController {
 
     var terminalRows: Int = 24
     var terminalCols: Int = 80
-    var cursorCol: Int = 0
+    var cursorCol: Int = 1
+    var cursorRow: Int = 24
 
-    func show(items: [SuggestionItem], selected: Int, cursorCol: Int?, termRows: Int?, termCols: Int?) {
+    func show(items: [SuggestionItem], selected: Int, cursorCol: Int?, cursorRow: Int?, termRows: Int?, termCols: Int?) {
         DispatchQueue.main.async { [self] in
             state.items = items
             state.selectedIndex = selected
             if let r = termRows { self.terminalRows = r }
             if let c = termCols { self.terminalCols = c }
             if let cc = cursorCol { self.cursorCol = cc }
+            if let cr = cursorRow { self.cursorRow = cr }
 
             let itemCount = min(items.count, 8)
             let itemHeight: CGFloat = 28
@@ -187,20 +190,22 @@ class OverlayWindowController {
         let titleBarHeight: CGFloat = 28
         let contentHeight = cgFrame.height - titleBarHeight
         let cellHeight = contentHeight / CGFloat(terminalRows)
-
-        // The cursor is near the bottom of the terminal (last prompt line).
-        // We estimate it's about 2 rows from the bottom.
-        let cursorRow = terminalRows - 2
-
-        // Cursor position in CG coordinates (from top of screen)
-        let cursorCGY = cgFrame.minY + titleBarHeight + CGFloat(cursorRow) * cellHeight
-
-        // Convert to NS coordinates: position dropdown just below cursor line
-        let dropdownNSY = screenHeight - cursorCGY - cellHeight - height
-
-        // X position: offset from left edge of terminal by cursor column
         let cellWidth = cgFrame.width / CGFloat(terminalCols)
-        let x = cgFrame.minX + CGFloat(cursorCol) * cellWidth
+
+        // cursorRow is 1-based from the terminal query (\e[6n)
+        // Position in CG coordinates (top-left origin):
+        // top of cursor line = window top + title bar + (row - 1) * cellHeight
+        let cursorTopCG = cgFrame.minY + titleBarHeight + CGFloat(cursorRow - 1) * cellHeight
+
+        // We want the dropdown BELOW the cursor line
+        let dropdownTopCG = cursorTopCG + cellHeight
+
+        // Convert CG (top-down) to NS (bottom-up):
+        // NS y = screenHeight - CG y - dropdown height
+        let dropdownNSY = screenHeight - dropdownTopCG - height
+
+        // X position: align with cursor column (1-based)
+        let x = cgFrame.minX + CGFloat(cursorCol - 1) * cellWidth
 
         // Clamp to screen bounds
         let clampedX = max(screen.visibleFrame.minX, min(x, screen.visibleFrame.maxX - 440))
@@ -305,6 +310,7 @@ class StdinReader {
                     items: items,
                     selected: command.selected ?? 0,
                     cursorCol: command.cursorCol,
+                    cursorRow: command.cursorRow,
                     termRows: command.terminalRows,
                     termCols: command.terminalCols
                 )

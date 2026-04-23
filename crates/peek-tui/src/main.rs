@@ -255,14 +255,58 @@ fn update_dropdown(
             dd.selected = 0;
             dd.visible = true;
             let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+            let (cursor_row, cursor_col) = query_cursor_position().unwrap_or((rows, 0));
             if let Ok(mut o) = overlay.lock() {
-                o.show(&suggestions, 0, line.len(), rows, cols);
+                o.show(&suggestions, 0, cursor_col as usize, cursor_row as usize, rows, cols);
             }
         } else {
             dd.visible = false;
             if let Ok(mut o) = overlay.lock() { o.hide(); }
         }
     }
+}
+
+/// Query the terminal for the actual cursor position using ANSI DSR.
+/// Returns (row, col) — 1-based.
+fn query_cursor_position() -> Option<(u16, u16)> {
+    use std::io::Write;
+    let stdin_fd = io::stdin().as_raw_fd();
+
+    // Send cursor position query to the real terminal
+    let mut stdout = io::stdout();
+    stdout.write_all(b"\x1b[6n").ok()?;
+    stdout.flush().ok()?;
+
+    // Read response: ESC [ row ; col R
+    let mut buf = [0u8; 32];
+    let mut pos = 0;
+
+    for _ in 0..32 {
+        let mut fds = [libc::pollfd {
+            fd: stdin_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 50) };
+        if ret <= 0 {
+            break;
+        }
+        let n = unsafe { libc::read(stdin_fd, buf[pos..pos + 1].as_mut_ptr() as *mut _, 1) };
+        if n <= 0 {
+            break;
+        }
+        pos += 1;
+        if buf[pos - 1] == b'R' {
+            break;
+        }
+    }
+
+    let response = std::str::from_utf8(&buf[..pos]).ok()?;
+    let inner = response.strip_prefix("\x1b[")?.strip_suffix('R')?;
+    let (row_str, col_str) = inner.split_once(';')?;
+    let row: u16 = row_str.parse().ok()?;
+    let col: u16 = col_str.parse().ok()?;
+    Some((row, col))
 }
 
 fn query_daemon(line: &str) -> Result<Vec<(String, String)>> {
