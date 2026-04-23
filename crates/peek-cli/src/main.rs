@@ -121,6 +121,10 @@ fn main() -> Result<()> {
                 "fish" => peek_shell::fish::init_script(),
                 _ => unreachable!("clap validates shell argument"),
             };
+            // Replace placeholder with the actual path to this binary
+            let exe = std::env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from("peek"));
+            let script = script.replace("PEEK_BIN", &exe.to_string_lossy());
             print!("{script}");
         }
 

@@ -3,7 +3,7 @@
 # Source via: peek init fish | source
 
 function _peek_ensure_daemon
-    peek start &>/dev/null
+    PEEK_BIN start &>/dev/null
 end
 
 # --- Completions ---
@@ -12,7 +12,7 @@ function _peek_complete
     set -l line (commandline)
     set -l cursor (commandline -C)
 
-    set -l response (peek _suggest --cwd "$cwd" --line "$line" --cursor $cursor 2>/dev/null)
+    set -l response (PEEK_BIN _suggest --cwd "$cwd" --line "$line" --cursor $cursor 2>/dev/null)
     or return
 
     set -l names (echo "$response" | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"$//')
@@ -39,7 +39,7 @@ complete -c cargo -f -a '(_peek_complete)'
 
 # --- Directory Change Hook ---
 function _peek_on_pwd --on-variable PWD
-    peek _cd --cwd "$PWD" &>/dev/null &
+    PEEK_BIN _cd --cwd "$PWD" &>/dev/null &
 end
 
 # --- Command Tracking ---
@@ -51,7 +51,7 @@ function _peek_postexec --on-event fish_postexec
             set -l rest (string replace "$p" "" -- "$cmd")
             set -l command (string split " " -- "$rest")[1]
             set -l tool (string split " " -- "$p")[1]
-            peek _executed --cwd "$PWD" --command "$command" --tool "$tool" &>/dev/null &
+            PEEK_BIN _executed --cwd "$PWD" --command "$command" --tool "$tool" &>/dev/null &
             break
         end
     end

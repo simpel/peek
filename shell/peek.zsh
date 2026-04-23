@@ -15,11 +15,11 @@ _peek_dropdown_height=0
 
 # --- Communication ---
 _peek_suggest() {
-  peek _suggest --cwd "$1" --line "$2" --cursor "$3" 2>/dev/null
+  PEEK_BIN _suggest --cwd "$1" --line "$2" --cursor "$3" 2>/dev/null
 }
 
 _peek_ensure_daemon() {
-  peek start &>/dev/null
+  PEEK_BIN start &>/dev/null
 }
 
 # --- Dropdown Rendering ---
@@ -221,7 +221,7 @@ fi
 
 # --- Directory Change Hook ---
 _peek_chpwd() {
-  peek _cd --cwd "$PWD" &>/dev/null &
+  PEEK_BIN _cd --cwd "$PWD" &>/dev/null &
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook chpwd _peek_chpwd
@@ -235,7 +235,7 @@ _peek_preexec() {
       local rest="${cmd#$p}"
       local command="${rest%% *}"
       local tool="${p%% *}"
-      peek _executed --cwd "$PWD" --command "$command" --tool "$tool" &>/dev/null &
+      PEEK_BIN _executed --cwd "$PWD" --command "$command" --tool "$tool" &>/dev/null &
       break
     fi
   done

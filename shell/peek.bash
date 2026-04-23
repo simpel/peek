@@ -7,7 +7,7 @@ PEEK_TRIGGER="${PEEK_TRIGGER:-auto}"
 
 # --- Communication ---
 _peek_ensure_daemon() {
-  peek start &>/dev/null
+  PEEK_BIN start &>/dev/null
 }
 
 # --- Completion Function ---
@@ -17,7 +17,7 @@ _peek_complete() {
   local cwd="$PWD"
 
   local response
-  response=$(peek _suggest --cwd "$cwd" --line "$line" --cursor "$cursor" 2>/dev/null) || return
+  response=$(PEEK_BIN _suggest --cwd "$cwd" --line "$line" --cursor "$cursor" 2>/dev/null) || return
 
   local names
   names=$(echo "$response" | grep -o '"name":"[^"]*"' | sed 's/"name":"//;s/"$//')
@@ -41,7 +41,7 @@ _peek_prompt_command() {
   local cwd="$PWD"
   if [[ "$cwd" != "$_PEEK_LAST_DIR" ]]; then
     _PEEK_LAST_DIR="$cwd"
-    peek _cd --cwd "$cwd" &>/dev/null &
+    PEEK_BIN _cd --cwd "$cwd" &>/dev/null &
   fi
 }
 _PEEK_LAST_DIR=""
@@ -61,7 +61,7 @@ _peek_debug_trap() {
       local rest="${cmd#$p}"
       local command="${rest%% *}"
       local tool="${p%% *}"
-      peek _executed --cwd "$PWD" --command "$command" --tool "$tool" &>/dev/null &
+      PEEK_BIN _executed --cwd "$PWD" --command "$command" --tool "$tool" &>/dev/null &
       break
     fi
   done
