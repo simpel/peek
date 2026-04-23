@@ -61,9 +61,17 @@ pub fn spawn_shell(shell: &str, cols: u16, rows: u16) -> Result<(RawFd, libc::pi
             if is_fish {
                 let shell_cstr = CString::new(shell).unwrap();
                 let c_flag = CString::new("-C").unwrap();
-                let init_cmd = CString::new(
-                    "complete -e -c pnpm; complete -e -c npm; complete -e -c yarn; complete -e -c bun; complete -e -c make; complete -e -c cargo"
-                ).unwrap();
+                // Erase existing completions AND register dummy ones.
+                // The dummy registration prevents fish from lazy-loading
+                // system completions from /usr/share/fish/completions/.
+                let init_cmd = CString::new(concat!(
+                    "complete -e -c pnpm; complete -c pnpm -f; ",
+                    "complete -e -c npm; complete -c npm -f; ",
+                    "complete -e -c yarn; complete -c yarn -f; ",
+                    "complete -e -c bun; complete -c bun -f; ",
+                    "complete -e -c make; complete -c make -f; ",
+                    "complete -e -c cargo; complete -c cargo -f",
+                )).unwrap();
                 let args = [
                     shell_cstr.as_ptr(),
                     c_flag.as_ptr(),
