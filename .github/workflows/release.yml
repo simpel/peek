@@ -137,13 +137,13 @@ jobs:
 
             def caveats
               <<~EOS
-                To start the peek daemon:
-                  brew services start peek
+                Run the setup command to activate peek in your shell:
+                  peek setup
 
-                To use inline completions, run your shell through peek-wrap:
-                  peek-wrap
+                This adds shell hooks to your config file (fish/zsh/bash).
+                Restart your terminal after setup.
 
-                Or add to your terminal's shell command setting.
+                The peek daemon starts automatically when needed.
               EOS
             end
 

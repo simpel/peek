@@ -53,6 +53,10 @@ enum Commands {
     History,
     /// Clear frecency data
     ClearHistory,
+    /// Add peek-wrap to your shell config (auto-start on new terminals)
+    Setup,
+    /// Remove peek-wrap from your shell config
+    Unsetup,
 
     /// (Internal) Query suggestions — used by shell integration
     #[command(name = "_suggest", hide = true)]
@@ -253,6 +257,74 @@ fn main() -> Result<()> {
                 println!("Frecency history cleared");
             } else {
                 println!("No history to clear");
+            }
+        }
+
+        Commands::Setup => {
+            let shell = std::env::var("SHELL").unwrap_or_default();
+            let peek_bin = std::env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from("peek"));
+            let peek_path = peek_bin.to_string_lossy();
+
+            let (rc_path, snippet) = if shell.contains("fish") {
+                (
+                    dirs::home_dir().unwrap().join(".config/fish/config.fish"),
+                    format!("# peek - inline autocomplete\n{peek_path} init fish | source\n"),
+                )
+            } else if shell.contains("zsh") {
+                (
+                    dirs::home_dir().unwrap().join(".zshrc"),
+                    format!("# peek - inline autocomplete\neval \"$({peek_path} init zsh)\"\n"),
+                )
+            } else {
+                (
+                    dirs::home_dir().unwrap().join(".bashrc"),
+                    format!("# peek - inline autocomplete\neval \"$({peek_path} init bash)\"\n"),
+                )
+            };
+
+            if rc_path.exists() {
+                let content = std::fs::read_to_string(&rc_path)?;
+                if content.contains("peek init") {
+                    println!("peek is already set up in {}", rc_path.display());
+                    return Ok(());
+                }
+            }
+
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&rc_path)?;
+            file.write_all(b"\n")?;
+            file.write_all(snippet.as_bytes())?;
+
+            println!("Added to {}", rc_path.display());
+            println!("Restart your terminal to activate.");
+        }
+
+        Commands::Unsetup => {
+            let shell = std::env::var("SHELL").unwrap_or_default();
+            let rc_path = if shell.contains("fish") {
+                dirs::home_dir().unwrap().join(".config/fish/config.fish")
+            } else if shell.contains("zsh") {
+                dirs::home_dir().unwrap().join(".zshrc")
+            } else {
+                dirs::home_dir().unwrap().join(".bashrc")
+            };
+
+            if rc_path.exists() {
+                let content = std::fs::read_to_string(&rc_path)?;
+                let filtered: Vec<&str> = content
+                    .lines()
+                    .filter(|line| {
+                        !line.contains("peek init")
+                            && !line.contains("peek - inline autocomplete")
+                    })
+                    .collect();
+                std::fs::write(&rc_path, filtered.join("\n") + "\n")?;
+                println!("Removed peek from {}", rc_path.display());
+            } else {
+                println!("Nothing to remove");
             }
         }
 
