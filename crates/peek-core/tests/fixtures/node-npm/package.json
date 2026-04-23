@@ -1,0 +1,7 @@
+{
+  "name": "npm-project",
+  "scripts": {
+    "start": "node index.js",
+    "test": "jest"
+  }
+}
