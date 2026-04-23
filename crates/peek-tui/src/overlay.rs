@@ -21,9 +21,7 @@ impl OverlayProcess {
         Ok(Self { child })
     }
 
-    /// Show the overlay at a specific screen position (CG coordinates: top-left origin).
-    /// If pos is None, the overlay will use its own fallback positioning.
-    pub fn show(&mut self, items: &[(String, String)], selected: usize, pos: Option<(i32, i32)>) {
+    pub fn show(&mut self, items: &[(String, String)], selected: usize) {
         let items_json: Vec<serde_json::Value> = items
             .iter()
             .map(|(name, preview)| {
@@ -34,16 +32,11 @@ impl OverlayProcess {
             })
             .collect();
 
-        let mut cmd = serde_json::json!({
+        let cmd = serde_json::json!({
             "action": "show",
             "items": items_json,
             "selected": selected,
         });
-
-        if let Some((x, y)) = pos {
-            cmd["screenX"] = serde_json::json!(x);
-            cmd["screenY"] = serde_json::json!(y);
-        }
 
         self.send_command(&cmd);
     }

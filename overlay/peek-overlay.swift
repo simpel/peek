@@ -1,5 +1,6 @@
 import Cocoa
 import SwiftUI
+import ApplicationServices
 
 // MARK: - Protocol Types
 
@@ -7,8 +8,6 @@ struct OverlayCommand: Codable {
     let action: String
     let items: [SuggestionItem]?
     let selected: Int?
-    let screenX: Int?  // screen X in CG coordinates (top-left origin)
-    let screenY: Int?  // screen Y in CG coordinates (top-left origin)
 }
 
 struct SuggestionItem: Codable, Identifiable {
@@ -91,6 +90,46 @@ struct VisualEffectView: NSViewRepresentable {
     }
 }
 
+// MARK: - Cursor Position via Accessibility API
+
+/// Get the screen rect of the text cursor in the focused application.
+/// Uses macOS Accessibility API (AXUIElement) — works for AppKit and
+/// Electron-based terminals (iTerm2, Terminal.app, Hyper, VSCode, etc.)
+func getCursorScreenRect() -> CGRect? {
+    let systemWide = AXUIElementCreateSystemWide()
+
+    var focusedElement: AnyObject?
+    let focusResult = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+    guard focusResult == .success, let focused = focusedElement else {
+        return nil
+    }
+
+    // Try to get the selected text range
+    var rangeValue: AnyObject?
+    let rangeResult = AXUIElementCopyAttributeValue(focused as! AXUIElement, kAXSelectedTextRangeAttribute as CFString, &rangeValue)
+    guard rangeResult == .success, let range = rangeValue else {
+        return nil
+    }
+
+    // Get the screen bounds for that text range
+    var boundsValue: AnyObject?
+    let boundsResult = AXUIElementCopyParameterizedAttributeValue(
+        focused as! AXUIElement,
+        kAXBoundsForRangeParameterizedAttribute as CFString,
+        range,
+        &boundsValue
+    )
+    guard boundsResult == .success, let bounds = boundsValue else {
+        return nil
+    }
+
+    var rect = CGRect.zero
+    if AXValueGetValue(bounds as! AXValue, .cgRect, &rect) {
+        return rect
+    }
+    return nil
+}
+
 // MARK: - Overlay Window
 
 class OverlayPanel: NSPanel {
@@ -114,7 +153,7 @@ class OverlayWindowController {
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false // SwiftUI handles shadow
+        panel.hasShadow = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
@@ -127,7 +166,7 @@ class OverlayWindowController {
         hostingView = hosting
     }
 
-    func show(items: [SuggestionItem], selected: Int, screenX: Int?, screenY: Int?) {
+    func show(items: [SuggestionItem], selected: Int) {
         DispatchQueue.main.async { [self] in
             state.items = items
             state.selectedIndex = selected
@@ -139,14 +178,20 @@ class OverlayWindowController {
 
             panel.setContentSize(NSSize(width: 440, height: height))
 
-            if let sx = screenX, let sy = screenY {
-                // CG coordinates (top-left origin) → NS coordinates (bottom-left origin)
+            // Use Accessibility API to get cursor position
+            if let cursorRect = getCursorScreenRect() {
                 let screenHeight = NSScreen.main?.frame.height ?? 1080
-                let nsX = CGFloat(sx)
-                let nsY = screenHeight - CGFloat(sy) - height
+                // cursorRect is in CG coordinates (top-left origin)
+                // Convert to NS coordinates (bottom-left origin)
+                let nsX = cursorRect.origin.x
+                let nsY = screenHeight - cursorRect.origin.y - cursorRect.height - height
                 panel.setFrameOrigin(NSPoint(x: nsX, y: nsY))
             } else {
-                positionFallback(height: height)
+                // Fallback: center of screen
+                if let screen = NSScreen.main {
+                    let f = screen.visibleFrame
+                    panel.setFrameOrigin(NSPoint(x: f.midX - 220, y: f.midY))
+                }
             }
 
             panel.orderFrontRegardless()
@@ -167,12 +212,6 @@ class OverlayWindowController {
             state.items = []
         }
     }
-
-    private func positionFallback(height: CGFloat) {
-        guard let screen = NSScreen.main else { return }
-        let f = screen.visibleFrame
-        panel.setFrameOrigin(NSPoint(x: f.midX - 220, y: f.midY))
-    }
 }
 
 // MARK: - Stdin Reader
@@ -192,7 +231,6 @@ class StdinReader {
             while true {
                 let data = handle.availableData
                 if data.isEmpty {
-                    // EOF — parent process closed the pipe
                     DispatchQueue.main.async {
                         NSApplication.shared.terminate(nil)
                     }
@@ -201,7 +239,6 @@ class StdinReader {
 
                 buffer.append(data)
 
-                // Process complete lines
                 while let newlineRange = buffer.range(of: Data([0x0a])) {
                     let lineData = buffer.subdata(in: buffer.startIndex..<newlineRange.lowerBound)
                     buffer.removeSubrange(buffer.startIndex...newlineRange.lowerBound)
@@ -224,12 +261,7 @@ class StdinReader {
         switch command.action {
         case "show":
             if let items = command.items {
-                controller.show(
-                    items: items,
-                    selected: command.selected ?? 0,
-                    screenX: command.screenX,
-                    screenY: command.screenY
-                )
+                controller.show(items: items, selected: command.selected ?? 0)
             }
         case "update":
             if let selected = command.selected {
@@ -250,32 +282,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var reader: StdinReader!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hide from dock and cmd-tab
         NSApp.setActivationPolicy(.accessory)
 
         controller = OverlayWindowController()
         reader = StdinReader(controller: controller)
         reader.start()
 
-        // Hide overlay when user switches to another app
+        // Hide overlay when user switches to a non-terminal app
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            // If the newly activated app is NOT a terminal, hide the overlay
-            let terminalBundleIds = [
-                "com.mitchellh.ghostty",
-                "com.googlecode.iterm2",
-                "com.apple.Terminal",
-                "io.alacritty",
-                "net.kovidgoyal.kitty",
-                "dev.warp.Warp-Stable",
-                "com.github.wez.wezterm",
-            ]
-            if let bundleId = app.bundleIdentifier,
-               !terminalBundleIds.contains(bundleId) {
+            let bundleId = app.bundleIdentifier ?? ""
+            // Hide unless the activated app is the terminal or our own overlay
+            let keepVisible = bundleId.contains("term") ||
+                            bundleId.contains("iterm") ||
+                            bundleId.contains("ghostty") ||
+                            bundleId.contains("hyper") ||
+                            bundleId.contains("kitty") ||
+                            bundleId.contains("alacritty") ||
+                            bundleId.contains("wezterm") ||
+                            bundleId.contains("warp")
+            if !keepVisible {
                 self?.controller.hide()
             }
         }

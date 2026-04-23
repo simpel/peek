@@ -254,94 +254,14 @@ fn update_dropdown(
             dd.items = suggestions.clone();
             dd.selected = 0;
             dd.visible = true;
-            let pos = query_overlay_position(line.len());
             if let Ok(mut o) = overlay.lock() {
-                o.show(&suggestions, 0, pos);
+                o.show(&suggestions, 0);
             }
         } else {
             dd.visible = false;
             if let Ok(mut o) = overlay.lock() { o.hide(); }
         }
     }
-}
-
-/// Read a terminal response from stdin, terminated by the given byte.
-fn read_terminal_response(stdin_fd: libc::c_int, terminator: u8) -> Option<String> {
-    let mut buf = [0u8; 64];
-    let mut pos = 0;
-
-    for _ in 0..64 {
-        let mut fds = [libc::pollfd {
-            fd: stdin_fd,
-            events: libc::POLLIN,
-            revents: 0,
-        }];
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 100) };
-        if ret <= 0 {
-            break;
-        }
-        let n = unsafe { libc::read(stdin_fd, buf[pos..pos + 1].as_mut_ptr() as *mut _, 1) };
-        if n <= 0 {
-            break;
-        }
-        pos += 1;
-        if buf[pos - 1] == terminator {
-            break;
-        }
-    }
-    if pos > 0 {
-        std::str::from_utf8(&buf[..pos]).ok().map(|s| s.to_string())
-    } else {
-        None
-    }
-}
-
-/// Query terminal geometry and cursor position.
-/// Returns (screen_x, screen_y) pixel coordinates for the dropdown.
-fn query_overlay_position(line_len: usize) -> Option<(i32, i32)> {
-    use std::io::Write;
-    let stdin_fd = io::stdin().as_raw_fd();
-    let mut stdout = io::stdout();
-
-    // Query cursor position: \e[6n → \e[row;colR
-    stdout.write_all(b"\x1b[6n").ok()?;
-    stdout.flush().ok()?;
-    let cursor_resp = read_terminal_response(stdin_fd, b'R')?;
-    let cursor_inner = cursor_resp.strip_prefix("\x1b[")?.strip_suffix('R')?;
-    let (row_str, col_str) = cursor_inner.split_once(';')?;
-    let cursor_row: i32 = row_str.parse().ok()?;
-    let cursor_col: i32 = col_str.parse().ok()?;
-
-    // Query window position: \e[13t → \e[3;x;yt
-    stdout.write_all(b"\x1b[13t").ok()?;
-    stdout.flush().ok()?;
-    let win_pos_resp = read_terminal_response(stdin_fd, b't')?;
-    let win_inner = win_pos_resp.strip_prefix("\x1b[3;")?.strip_suffix('t')?;
-    let (wx_str, wy_str) = win_inner.split_once(';')?;
-    let win_x: i32 = wx_str.parse().ok()?;
-    let win_y: i32 = wy_str.parse().ok()?;
-
-    // Query window size in pixels: \e[14t → \e[4;height;widtht
-    stdout.write_all(b"\x1b[14t").ok()?;
-    stdout.flush().ok()?;
-    let win_size_resp = read_terminal_response(stdin_fd, b't')?;
-    let size_inner = win_size_resp.strip_prefix("\x1b[4;")?.strip_suffix('t')?;
-    let (wh_str, ww_str) = size_inner.split_once(';')?;
-    let win_pixel_h: i32 = wh_str.parse().ok()?;
-    let win_pixel_w: i32 = ww_str.parse().ok()?;
-
-    // Get terminal dimensions in characters
-    let (term_cols, term_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-
-    // Calculate cell size
-    let cell_h = win_pixel_h / term_rows as i32;
-    let cell_w = win_pixel_w / term_cols as i32;
-
-    // Screen coordinates for dropdown (just below the cursor line)
-    let x = win_x + (cursor_col - 1) * cell_w;
-    let y = win_y + cursor_row * cell_h; // row is 1-based, so cursor_row * cell_h = below the cursor line
-
-    Some((x, y))
 }
 
 fn query_daemon(line: &str) -> Result<Vec<(String, String)>> {
