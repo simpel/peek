@@ -65,13 +65,15 @@ impl TuiDropdown {
         if self.rendered_lines == 0 {
             return;
         }
-        // Move down and clear each line we rendered, then come back
-        for _ in 0..self.rendered_lines {
-            // Move down one line, go to column 1, clear line
-            write!(w, "\x1b[1B\r\x1b[2K").ok();
+        let n = self.rendered_lines;
+        // Move cursor down, clearing each line
+        let mut buf = String::with_capacity(n * 10);
+        for _ in 0..n {
+            buf.push_str("\r\n\x1b[2K");
         }
-        // Move back up to original position
-        write!(w, "\x1b[{}A", self.rendered_lines).ok();
+        // Move back up
+        buf.push_str(&format!("\x1b[{}A\r", n));
+        w.write_all(buf.as_bytes()).ok();
         w.flush().ok();
         self.rendered_lines = 0;
     }
@@ -82,13 +84,21 @@ impl TuiDropdown {
         }
 
         let count = self.items.len().min(MAX_VISIBLE);
+        let total_lines = count + 2; // top border + items + bottom border
         let border: String = "-".repeat(INNER_W);
 
         let mut buf = String::with_capacity(2048);
 
-        // Top border: move down 1, clear, draw
-        buf.push_str("\x1b[1B\r\x1b[2K");
-        buf.push_str(&format!(" \x1b[90m+{}+\x1b[0m", border));
+        // First: scroll to ensure space below cursor.
+        // Print newlines to create room, then move back up.
+        for _ in 0..total_lines {
+            buf.push('\n');
+        }
+        buf.push_str(&format!("\x1b[{}A", total_lines));
+
+        // Now render each line below the cursor.
+        // Top border
+        buf.push_str(&format!("\r\n\x1b[2K \x1b[90m+{}+\x1b[0m", border));
 
         // Items
         for i in 0..count {
@@ -96,8 +106,7 @@ impl TuiDropdown {
             let dname = truncate(name, NAME_W);
             let dprev = truncate(preview, PREVIEW_W);
 
-            buf.push_str("\x1b[1B\r\x1b[2K");
-
+            buf.push_str("\r\n\x1b[2K");
             if i == self.selected {
                 buf.push_str(&format!(
                     " \x1b[90m|\x1b[0m\x1b[7m {:nw$} {:>pw$} \x1b[0m\x1b[90m|\x1b[0m",
@@ -112,13 +121,12 @@ impl TuiDropdown {
         }
 
         // Bottom border
-        buf.push_str("\x1b[1B\r\x1b[2K");
-        buf.push_str(&format!(" \x1b[90m+{}+\x1b[0m", border));
+        buf.push_str(&format!("\r\n\x1b[2K \x1b[90m+{}+\x1b[0m", border));
 
-        self.rendered_lines = count + 2;
+        // Move cursor back up to original position
+        buf.push_str(&format!("\x1b[{}A\r", total_lines));
 
-        // Move back up to the original cursor position
-        buf.push_str(&format!("\x1b[{}A", self.rendered_lines));
+        self.rendered_lines = total_lines;
 
         w.write_all(buf.as_bytes()).ok();
         w.flush().ok();

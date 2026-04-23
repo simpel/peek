@@ -209,21 +209,25 @@ fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
                 };
 
                 if needs_fetch {
-                    // Fetch from daemon (only happens once per tool switch)
-                    drop(t);
-                    drop(d);
-                    if let Ok(items) = query_daemon(&line) {
-                        *cache.lock().unwrap() = Some(SuggestionCache {
-                            tool_prefix: tool.command_prefix().to_string(),
-                            all_items: items.clone(),
-                        });
-                        let filtered = fuzzy_filter(&items, filter);
-                        let mut d = dd.lock().unwrap();
-                        if !filtered.is_empty() {
-                            d.update(filtered);
-                            d.render(&mut stdout);
+                    // Fetch from daemon in background — never block typing
+                    let line_clone = line.clone();
+                    let prefix = tool.command_prefix().to_string();
+                    let cache_bg = cache.clone();
+                    let dd_bg = dd.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(items) = query_daemon(&line_clone) {
+                            *cache_bg.lock().unwrap() = Some(SuggestionCache {
+                                tool_prefix: prefix,
+                                all_items: items.clone(),
+                            });
+                            let mut d = dd_bg.lock().unwrap();
+                            if !items.is_empty() {
+                                d.update(items);
+                                let mut out = io::stdout();
+                                d.render(&mut out);
+                            }
                         }
-                    }
+                    });
                 } else {
                     // Filter from cache
                     let c = cache.lock().unwrap();
