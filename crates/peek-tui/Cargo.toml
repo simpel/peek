@@ -1,0 +1,17 @@
+[package]
+name = "peek-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "peek-wrap"
+path = "src/main.rs"
+
+[dependencies]
+peek-core = { workspace = true }
+anyhow = { workspace = true }
+crossterm = { workspace = true }
+libc = "0.2"
+serde_json = { workspace = true }
+dirs = { workspace = true }
