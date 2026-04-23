@@ -7,10 +7,8 @@ struct OverlayCommand: Codable {
     let action: String
     let items: [SuggestionItem]?
     let selected: Int?
-    let cursorCol: Int?     // cursor column in the terminal (1-based)
-    let cursorRow: Int?     // cursor row in the terminal (1-based)
-    let terminalRows: Int?  // total terminal rows
-    let terminalCols: Int?  // total terminal columns
+    let screenX: Int?  // screen X in CG coordinates (top-left origin)
+    let screenY: Int?  // screen Y in CG coordinates (top-left origin)
 }
 
 struct SuggestionItem: Codable, Identifiable {
@@ -129,28 +127,28 @@ class OverlayWindowController {
         hostingView = hosting
     }
 
-    var terminalRows: Int = 24
-    var terminalCols: Int = 80
-    var cursorCol: Int = 1
-    var cursorRow: Int = 24
-
-    func show(items: [SuggestionItem], selected: Int, cursorCol: Int?, cursorRow: Int?, termRows: Int?, termCols: Int?) {
+    func show(items: [SuggestionItem], selected: Int, screenX: Int?, screenY: Int?) {
         DispatchQueue.main.async { [self] in
             state.items = items
             state.selectedIndex = selected
-            if let r = termRows { self.terminalRows = r }
-            if let c = termCols { self.terminalCols = c }
-            if let cc = cursorCol { self.cursorCol = cc }
-            if let cr = cursorRow { self.cursorRow = cr }
 
             let itemCount = min(items.count, 8)
             let itemHeight: CGFloat = 28
             let padding: CGFloat = 12
             let height = CGFloat(itemCount) * itemHeight + padding
 
-            positionNearCursor(height: height)
-
             panel.setContentSize(NSSize(width: 440, height: height))
+
+            if let sx = screenX, let sy = screenY {
+                // CG coordinates (top-left origin) → NS coordinates (bottom-left origin)
+                let screenHeight = NSScreen.main?.frame.height ?? 1080
+                let nsX = CGFloat(sx)
+                let nsY = screenHeight - CGFloat(sy) - height
+                panel.setFrameOrigin(NSPoint(x: nsX, y: nsY))
+            } else {
+                positionFallback(height: height)
+            }
+
             panel.orderFrontRegardless()
             state.isVisible = true
         }
@@ -170,90 +168,10 @@ class OverlayWindowController {
         }
     }
 
-    private func positionNearCursor(height: CGFloat) {
+    private func positionFallback(height: CGFloat) {
         guard let screen = NSScreen.main else { return }
-        let screenHeight = screen.frame.height
-
-        guard let cgFrame = getTerminalWindowFrame() else {
-            // Fallback: center bottom of screen
-            let f = screen.visibleFrame
-            panel.setFrameOrigin(NSPoint(x: f.midX - 220, y: f.minY + 60))
-            return
-        }
-
-        // CG coordinates: origin at top-left of main display
-        // NS coordinates: origin at bottom-left of main display
-        //
-        // cgFrame.minY = distance from top of screen to top of window (CG)
-        // cgFrame.maxY = distance from top of screen to bottom of window (CG)
-
-        let titleBarHeight: CGFloat = 28
-        let contentHeight = cgFrame.height - titleBarHeight
-        let cellHeight = contentHeight / CGFloat(terminalRows)
-        let cellWidth = cgFrame.width / CGFloat(terminalCols)
-
-        // cursorRow is 1-based from the terminal query (\e[6n)
-        // Position in CG coordinates (top-left origin):
-        // top of cursor line = window top + title bar + (row - 1) * cellHeight
-        let cursorTopCG = cgFrame.minY + titleBarHeight + CGFloat(cursorRow - 1) * cellHeight
-
-        // We want the dropdown BELOW the cursor line
-        let dropdownTopCG = cursorTopCG + cellHeight
-
-        // Convert CG (top-down) to NS (bottom-up):
-        // NS y = screenHeight - CG y - dropdown height
-        let dropdownNSY = screenHeight - dropdownTopCG - height
-
-        // X position: align with cursor column (1-based)
-        let x = cgFrame.minX + CGFloat(cursorCol - 1) * cellWidth
-
-        // Clamp to screen bounds
-        let clampedX = max(screen.visibleFrame.minX, min(x, screen.visibleFrame.maxX - 440))
-        let clampedY = max(screen.visibleFrame.minY, dropdownNSY)
-
-        panel.setFrameOrigin(NSPoint(x: clampedX, y: clampedY))
-    }
-
-    private func getTerminalWindowFrame() -> CGRect? {
-        let options = CGWindowListOption([.optionOnScreenOnly, .excludeDesktopElements])
-        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
-            return nil
-        }
-
-        // Find terminal windows (common terminal apps)
-        let terminalBundleIds = [
-            "com.mitchellh.ghostty",
-            "com.googlecode.iterm2",
-            "com.apple.Terminal",
-            "io.alacritty",
-            "net.kovidgoyal.kitty",
-            "dev.warp.Warp-Stable",
-            "com.github.wez.wezterm",
-        ]
-
-        for window in windowList {
-            guard let ownerName = window[kCGWindowOwnerName as String] as? String,
-                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
-                  let layer = window[kCGWindowLayer as String] as? Int,
-                  layer == 0 else { continue }
-
-            // Check if it's a terminal by bundle ID or name
-            let bundleId = window["kCGWindowOwnerBundleIdentifier" as String] as? String ?? ""
-            let isTerminal = terminalBundleIds.contains(bundleId) ||
-                           ownerName.lowercased().contains("terminal") ||
-                           ownerName.lowercased().contains("iterm") ||
-                           ownerName.lowercased().contains("ghostty")
-
-            if isTerminal {
-                let x = bounds["X"] ?? 0
-                let y = bounds["Y"] ?? 0
-                let w = bounds["Width"] ?? 800
-                let h = bounds["Height"] ?? 600
-                return CGRect(x: x, y: y, width: w, height: h)
-            }
-        }
-
-        return nil
+        let f = screen.visibleFrame
+        panel.setFrameOrigin(NSPoint(x: f.midX - 220, y: f.midY))
     }
 }
 
@@ -309,10 +227,8 @@ class StdinReader {
                 controller.show(
                     items: items,
                     selected: command.selected ?? 0,
-                    cursorCol: command.cursorCol,
-                    cursorRow: command.cursorRow,
-                    termRows: command.terminalRows,
-                    termCols: command.terminalCols
+                    screenX: command.screenX,
+                    screenY: command.screenY
                 )
             }
         case "update":

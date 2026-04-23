@@ -9,7 +9,6 @@ pub struct OverlayProcess {
 
 impl OverlayProcess {
     pub fn spawn() -> Result<Self> {
-        // Find peek-overlay next to our binary
         let overlay_bin = find_overlay_binary()?;
 
         let child = Command::new(&overlay_bin)
@@ -22,15 +21,9 @@ impl OverlayProcess {
         Ok(Self { child })
     }
 
-    pub fn show(
-        &mut self,
-        items: &[(String, String)],
-        selected: usize,
-        cursor_col: usize,
-        cursor_row: usize,
-        term_rows: u16,
-        term_cols: u16,
-    ) {
+    /// Show the overlay at a specific screen position (CG coordinates: top-left origin).
+    /// If pos is None, the overlay will use its own fallback positioning.
+    pub fn show(&mut self, items: &[(String, String)], selected: usize, pos: Option<(i32, i32)>) {
         let items_json: Vec<serde_json::Value> = items
             .iter()
             .map(|(name, preview)| {
@@ -41,15 +34,16 @@ impl OverlayProcess {
             })
             .collect();
 
-        let cmd = serde_json::json!({
+        let mut cmd = serde_json::json!({
             "action": "show",
             "items": items_json,
             "selected": selected,
-            "cursorCol": cursor_col,
-            "cursorRow": cursor_row,
-            "terminalRows": term_rows,
-            "terminalCols": term_cols,
         });
+
+        if let Some((x, y)) = pos {
+            cmd["screenX"] = serde_json::json!(x);
+            cmd["screenY"] = serde_json::json!(y);
+        }
 
         self.send_command(&cmd);
     }
@@ -84,7 +78,6 @@ impl OverlayProcess {
 }
 
 fn find_overlay_binary() -> Result<std::path::PathBuf> {
-    // Look next to our own binary
     if let Ok(exe) = std::env::current_exe() {
         let dir = exe.parent().unwrap();
         let overlay = dir.join("peek-overlay");
@@ -92,7 +85,5 @@ fn find_overlay_binary() -> Result<std::path::PathBuf> {
             return Ok(overlay);
         }
     }
-
-    // Fall back to PATH
     Ok(std::path::PathBuf::from("peek-overlay"))
 }
