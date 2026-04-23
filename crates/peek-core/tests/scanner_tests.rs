@@ -82,9 +82,10 @@ fn test_scan_directory_pnpm() {
     let dir = fixture_dir("node-pnpm");
     let results = scan_directory(&dir);
 
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].tool, Tool::Pnpm);
-    assert_eq!(results[0].entries.len(), 5);
+    // Scripts registered for all 4 JS package managers
+    assert_eq!(results.len(), 4);
+    let pnpm = results.iter().find(|r| r.tool == Tool::Pnpm).unwrap();
+    assert_eq!(pnpm.entries.len(), 5);
 }
 
 #[test]

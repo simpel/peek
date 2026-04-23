@@ -258,12 +258,16 @@ pub fn parse_cargo_commands(dir: &Path) -> Result<Vec<ScriptEntry>> {
 pub fn scan_directory(dir: &Path) -> Vec<ToolScripts> {
     let mut results = Vec::new();
 
-    // Package manager scripts
+    // Package manager scripts — register for ALL JS package managers so
+    // suggestions work regardless of which lockfile is present.
     if dir.join("package.json").exists() {
-        if let Some(tool) = detect_package_manager(dir) {
-            if let Ok(entries) = parse_package_json_scripts(dir) {
-                if !entries.is_empty() {
-                    results.push(ToolScripts { tool, entries });
+        if let Ok(entries) = parse_package_json_scripts(dir) {
+            if !entries.is_empty() {
+                for tool in [Tool::Pnpm, Tool::Npm, Tool::Yarn, Tool::Bun] {
+                    results.push(ToolScripts {
+                        tool,
+                        entries: entries.clone(),
+                    });
                 }
             }
         }
