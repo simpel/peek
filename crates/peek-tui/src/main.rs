@@ -1,8 +1,8 @@
 mod line_tracker;
-mod overlay;
 mod pty;
+mod tui;
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 
@@ -10,29 +10,17 @@ use anyhow::{Context, Result};
 use crossterm::terminal;
 
 use crate::line_tracker::LineTracker;
-use crate::overlay::OverlayProcess;
+use crate::tui::TuiDropdown;
 
 fn main() -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-
     let (cols, rows) = terminal::size().context("failed to get terminal size")?;
     let (master_fd, child_pid) = pty::spawn_shell(&shell, cols, rows)?;
 
-    // Spawn the native overlay GUI process
-    let overlay = Arc::new(Mutex::new(OverlayProcess::spawn()?));
-
     terminal::enable_raw_mode().context("failed to enable raw mode")?;
-
-    let result = run_event_loop(master_fd, &overlay);
-
+    let result = run_event_loop(master_fd);
     terminal::disable_raw_mode().ok();
 
-    // Kill overlay
-    if let Ok(mut o) = overlay.lock() {
-        o.kill();
-    }
-
-    // Wait for shell child
     unsafe {
         let mut status: libc::c_int = 0;
         libc::waitpid(child_pid, &mut status, 0);
@@ -41,67 +29,61 @@ fn main() -> Result<()> {
     result
 }
 
-struct DropdownState {
-    visible: bool,
-    items: Vec<(String, String)>,
-    selected: usize,
-}
-
-impl DropdownState {
-    fn new() -> Self {
-        Self {
-            visible: false,
-            items: Vec::new(),
-            selected: 0,
-        }
-    }
-}
-
-fn run_event_loop(master_fd: libc::c_int, overlay: &Arc<Mutex<OverlayProcess>>) -> Result<()> {
-    let line_tracker = Arc::new(Mutex::new(LineTracker::new()));
-    let dd_state = Arc::new(Mutex::new(DropdownState::new()));
-
+fn run_event_loop(master_fd: libc::c_int) -> Result<()> {
+    let dd = Arc::new(Mutex::new(TuiDropdown::new()));
+    let tracker = Arc::new(Mutex::new(LineTracker::new()));
     let stdin_fd = io::stdin().as_raw_fd();
 
-    // Thread: read from PTY master → write to stdout (pass-through)
-    let master_fd_copy = master_fd;
+    // Thread: PTY output → stdout (pass-through, but pause for dropdown redraws)
+    let dd_out = dd.clone();
     let pty_reader = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         let mut stdout = io::stdout();
         loop {
-            let n = unsafe { libc::read(master_fd_copy, buf.as_mut_ptr() as *mut _, buf.len()) };
+            let n = unsafe { libc::read(master_fd, buf.as_mut_ptr() as *mut _, buf.len()) };
             if n <= 0 {
                 break;
             }
-            stdout.write_all(&buf[..n as usize]).ok();
+            let data = &buf[..n as usize];
+
+            let mut d = dd_out.lock().unwrap();
+            if d.visible {
+                d.clear(&mut stdout);
+            }
+
+            stdout.write_all(data).ok();
             stdout.flush().ok();
+
+            if d.visible {
+                d.render(&mut stdout);
+            }
         }
     });
 
-    // Thread: handle terminal resize
-    let master_fd_copy = master_fd;
+    // Thread: terminal resize → PTY
+    let mfd = master_fd;
     std::thread::spawn(move || {
-        let mut last_size = (0u16, 0u16);
+        let mut last = (0u16, 0u16);
         loop {
             std::thread::sleep(std::time::Duration::from_millis(500));
             if let Ok(size) = terminal::size() {
-                if size != last_size {
-                    last_size = size;
+                if size != last {
+                    last = size;
                     let ws = libc::winsize {
                         ws_row: size.1,
                         ws_col: size.0,
                         ws_xpixel: 0,
                         ws_ypixel: 0,
                     };
-                    unsafe {
-                        libc::ioctl(master_fd_copy, libc::TIOCSWINSZ, &ws);
-                    }
+                    unsafe { libc::ioctl(mfd, libc::TIOCSWINSZ, &ws); }
                 }
             }
         }
     });
 
-    // Main thread: read stdin → process or forward to PTY
+    // Main loop: stdin → process or forward to PTY
+    let mut stdout = io::stdout();
+
     loop {
         let mut fds = [libc::pollfd {
             fd: stdin_fd,
@@ -112,8 +94,7 @@ fn run_event_loop(master_fd: libc::c_int, overlay: &Arc<Mutex<OverlayProcess>>) 
         let ret = unsafe { libc::poll(fds.as_mut_ptr(), 1, 100) };
         if ret <= 0 {
             let mut status: libc::c_int = 0;
-            let w = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-            if w > 0 {
+            if unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } > 0 {
                 break;
             }
             continue;
@@ -126,115 +107,99 @@ fn run_event_loop(master_fd: libc::c_int, overlay: &Arc<Mutex<OverlayProcess>>) 
         }
         let data = &buf[..n as usize];
 
-        let mut dd = dd_state.lock().unwrap();
-        let mut tracker = line_tracker.lock().unwrap();
+        let mut d = dd.lock().unwrap();
+        let mut t = tracker.lock().unwrap();
 
-        if dd.visible {
+        if d.visible {
             let mut i = 0;
             while i < data.len() {
-                let remaining = &data[i..];
-                match remaining {
+                let rest = &data[i..];
+                match rest {
                     // Up arrow
                     [0x1b, b'[', b'A', ..] => {
-                        if dd.selected > 0 {
-                            dd.selected -= 1;
-                        } else {
-                            dd.selected = dd.items.len().saturating_sub(1);
-                        }
-                        if let Ok(mut o) = overlay.lock() {
-                            o.update_selection(dd.selected);
-                        }
+                        d.move_up();
+                        d.clear(&mut stdout);
+                        d.render(&mut stdout);
                         i += 3;
                     }
                     // Down arrow
                     [0x1b, b'[', b'B', ..] => {
-                        if dd.selected < dd.items.len().saturating_sub(1) {
-                            dd.selected += 1;
-                        } else {
-                            dd.selected = 0;
-                        }
-                        if let Ok(mut o) = overlay.lock() {
-                            o.update_selection(dd.selected);
-                        }
+                        d.move_down();
+                        d.clear(&mut stdout);
+                        d.render(&mut stdout);
                         i += 3;
                     }
-                    // Tab: accept
+                    // Tab: accept selection
                     [0x09, ..] => {
-                        if let Some((name, _)) = dd.items.get(dd.selected) {
-                            let name = name.clone();
-                            let filter = tracker.filter_text();
-                            // Delete filter, type selection
-                            for _ in 0..filter.len() {
-                                unsafe { libc::write(master_fd, b"\x08".as_ptr() as *const _, 1); }
-                            }
-                            unsafe {
-                                libc::write(master_fd, name.as_ptr() as *const _, name.len());
-                            }
-                            tracker.replace_filter(&name);
+                        if let Some(name) = d.selected_name() {
+                            let name = name.to_string();
+                            d.clear(&mut stdout);
+                            d.hide();
+                            stdout.flush().ok();
+
+                            let filter = t.filter_text();
+                            send_backspaces(master_fd, filter.len());
+                            send_text(master_fd, &name);
+                            t.replace_filter(&name);
                         }
-                        dd.visible = false;
-                        if let Ok(mut o) = overlay.lock() { o.hide(); }
                         i += 1;
                     }
-                    // Escape (standalone)
-                    [0x1b] if remaining.len() == 1 => {
-                        dd.visible = false;
-                        if let Ok(mut o) = overlay.lock() { o.hide(); }
+                    // Escape
+                    [0x1b] if rest.len() == 1 => {
+                        d.clear(&mut stdout);
+                        d.hide();
+                        stdout.flush().ok();
                         i += 1;
                     }
                     // Enter: accept and run
                     [0x0d, ..] => {
-                        if let Some((name, _)) = dd.items.get(dd.selected) {
-                            let name = name.clone();
-                            let filter = tracker.filter_text();
-                            for _ in 0..filter.len() {
-                                unsafe { libc::write(master_fd, b"\x08".as_ptr() as *const _, 1); }
-                            }
-                            unsafe {
-                                libc::write(master_fd, name.as_ptr() as *const _, name.len());
-                                libc::write(master_fd, b"\r".as_ptr() as *const _, 1);
-                            }
+                        if let Some(name) = d.selected_name() {
+                            let name = name.to_string();
+                            d.clear(&mut stdout);
+                            d.hide();
+                            stdout.flush().ok();
+
+                            let filter = t.filter_text();
+                            send_backspaces(master_fd, filter.len());
+                            send_text(master_fd, &name);
+                            send_byte(master_fd, 0x0d);
                         } else {
-                            unsafe { libc::write(master_fd, b"\r".as_ptr() as *const _, 1); }
+                            send_byte(master_fd, 0x0d);
                         }
-                        dd.visible = false;
-                        if let Ok(mut o) = overlay.lock() { o.hide(); }
-                        tracker.reset();
+                        t.reset();
                         i += 1;
                     }
-                    // Other: forward and update
+                    // Other keys: forward + update suggestions
                     _ => {
-                        unsafe { libc::write(master_fd, data[i..i+1].as_ptr() as *const _, 1); }
-                        tracker.feed(&data[i..i+1]);
+                        send_bytes(master_fd, &data[i..i + 1]);
+                        t.feed(&data[i..i + 1]);
                         i += 1;
 
-                        let line = tracker.current_line();
+                        let line = t.current_line();
                         if peek_core::tools::match_tool_prefix(&line).is_some() {
-                            // Re-query daemon
-                            drop(tracker);
-                            drop(dd);
-                            update_dropdown(&line, &dd_state, overlay);
-                            dd = dd_state.lock().unwrap();
-                            tracker = line_tracker.lock().unwrap();
+                            drop(t);
+                            drop(d);
+                            refresh_suggestions(&line, &dd, &mut stdout);
+                            d = dd.lock().unwrap();
+                            t = tracker.lock().unwrap();
                         } else {
-                            dd.visible = false;
-                            if let Ok(mut o) = overlay.lock() { o.hide(); }
+                            d.clear(&mut stdout);
+                            d.hide();
+                            stdout.flush().ok();
                         }
                     }
                 }
             }
         } else {
-            // Forward everything, track input
-            unsafe {
-                libc::write(master_fd, data.as_ptr() as *const _, data.len());
-            }
-            tracker.feed(data);
+            // No dropdown: forward all input, track typing
+            send_bytes(master_fd, data);
+            t.feed(data);
 
-            let line = tracker.current_line();
+            let line = t.current_line();
             if peek_core::tools::match_tool_prefix(&line).is_some() {
-                drop(tracker);
-                drop(dd);
-                update_dropdown(&line, &dd_state, overlay);
+                drop(t);
+                drop(d);
+                refresh_suggestions(&line, &dd, &mut stdout);
             }
         }
     }
@@ -243,24 +208,36 @@ fn run_event_loop(master_fd: libc::c_int, overlay: &Arc<Mutex<OverlayProcess>>) 
     Ok(())
 }
 
-fn update_dropdown(
-    line: &str,
-    dd_state: &Arc<Mutex<DropdownState>>,
-    overlay: &Arc<Mutex<OverlayProcess>>,
-) {
+fn refresh_suggestions(line: &str, dd: &Arc<Mutex<TuiDropdown>>, stdout: &mut io::Stdout) {
     if let Ok(suggestions) = query_daemon(line) {
-        let mut dd = dd_state.lock().unwrap();
+        let mut d = dd.lock().unwrap();
         if !suggestions.is_empty() {
-            dd.items = suggestions.clone();
-            dd.selected = 0;
-            dd.visible = true;
-            if let Ok(mut o) = overlay.lock() {
-                o.show(&suggestions, 0);
-            }
+            d.clear(stdout);
+            d.update(suggestions);
+            d.render(stdout);
         } else {
-            dd.visible = false;
-            if let Ok(mut o) = overlay.lock() { o.hide(); }
+            d.clear(stdout);
+            d.hide();
+            stdout.flush().ok();
         }
+    }
+}
+
+fn send_bytes(fd: libc::c_int, data: &[u8]) {
+    unsafe { libc::write(fd, data.as_ptr() as *const _, data.len()); }
+}
+
+fn send_byte(fd: libc::c_int, b: u8) {
+    send_bytes(fd, &[b]);
+}
+
+fn send_text(fd: libc::c_int, text: &str) {
+    send_bytes(fd, text.as_bytes());
+}
+
+fn send_backspaces(fd: libc::c_int, count: usize) {
+    for _ in 0..count {
+        send_byte(fd, 0x08);
     }
 }
 
