@@ -254,8 +254,9 @@ fn update_dropdown(
             dd.items = suggestions.clone();
             dd.selected = 0;
             dd.visible = true;
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
             if let Ok(mut o) = overlay.lock() {
-                o.show(&suggestions, 0);
+                o.show(&suggestions, 0, line.len(), rows, cols);
             }
         } else {
             dd.visible = false;

@@ -22,7 +22,14 @@ impl OverlayProcess {
         Ok(Self { child })
     }
 
-    pub fn show(&mut self, items: &[(String, String)], selected: usize) {
+    pub fn show(
+        &mut self,
+        items: &[(String, String)],
+        selected: usize,
+        cursor_col: usize,
+        term_rows: u16,
+        term_cols: u16,
+    ) {
         let items_json: Vec<serde_json::Value> = items
             .iter()
             .map(|(name, preview)| {
@@ -37,6 +44,9 @@ impl OverlayProcess {
             "action": "show",
             "items": items_json,
             "selected": selected,
+            "cursorCol": cursor_col,
+            "terminalRows": term_rows,
+            "terminalCols": term_cols,
         });
 
         self.send_command(&cmd);

@@ -7,6 +7,9 @@ struct OverlayCommand: Codable {
     let action: String
     let items: [SuggestionItem]?
     let selected: Int?
+    let cursorCol: Int?     // cursor column in the terminal
+    let terminalRows: Int?  // total terminal rows
+    let terminalCols: Int?  // total terminal columns
 }
 
 struct SuggestionItem: Codable, Identifiable {
@@ -125,18 +128,23 @@ class OverlayWindowController {
         hostingView = hosting
     }
 
-    func show(items: [SuggestionItem], selected: Int) {
+    var terminalRows: Int = 24
+    var terminalCols: Int = 80
+    var cursorCol: Int = 0
+
+    func show(items: [SuggestionItem], selected: Int, cursorCol: Int?, termRows: Int?, termCols: Int?) {
         DispatchQueue.main.async { [self] in
             state.items = items
             state.selectedIndex = selected
+            if let r = termRows { self.terminalRows = r }
+            if let c = termCols { self.terminalCols = c }
+            if let cc = cursorCol { self.cursorCol = cc }
 
-            // Calculate height based on item count
             let itemCount = min(items.count, 8)
             let itemHeight: CGFloat = 28
             let padding: CGFloat = 12
             let height = CGFloat(itemCount) * itemHeight + padding
 
-            // Position near the frontmost terminal window's cursor
             positionNearCursor(height: height)
 
             panel.setContentSize(NSSize(width: 440, height: height))
@@ -160,26 +168,45 @@ class OverlayWindowController {
     }
 
     private func positionNearCursor(height: CGFloat) {
-        // Find the frontmost terminal window and position below it
         guard let screen = NSScreen.main else { return }
+        let screenHeight = screen.frame.height
 
-        // Get frontmost app's window position via CGWindowList
-        if let windowInfo = getTerminalWindowFrame() {
-            // Position at bottom-left area of the terminal window
-            // The y-coordinate from CG is top-down, but NSWindow uses bottom-up
-            let screenHeight = screen.frame.height
-            let windowBottom = screenHeight - windowInfo.maxY
-            let x = windowInfo.minX + 20
-            let y = windowBottom + 40 // Just above the bottom of terminal
-
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
-        } else {
+        guard let cgFrame = getTerminalWindowFrame() else {
             // Fallback: center bottom of screen
-            let screenFrame = screen.visibleFrame
-            let x = screenFrame.midX - 220
-            let y = screenFrame.minY + 60
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
+            let f = screen.visibleFrame
+            panel.setFrameOrigin(NSPoint(x: f.midX - 220, y: f.minY + 60))
+            return
         }
+
+        // CG coordinates: origin at top-left of main display
+        // NS coordinates: origin at bottom-left of main display
+        //
+        // cgFrame.minY = distance from top of screen to top of window (CG)
+        // cgFrame.maxY = distance from top of screen to bottom of window (CG)
+
+        let titleBarHeight: CGFloat = 28
+        let contentHeight = cgFrame.height - titleBarHeight
+        let cellHeight = contentHeight / CGFloat(terminalRows)
+
+        // The cursor is near the bottom of the terminal (last prompt line).
+        // We estimate it's about 2 rows from the bottom.
+        let cursorRow = terminalRows - 2
+
+        // Cursor position in CG coordinates (from top of screen)
+        let cursorCGY = cgFrame.minY + titleBarHeight + CGFloat(cursorRow) * cellHeight
+
+        // Convert to NS coordinates: position dropdown just below cursor line
+        let dropdownNSY = screenHeight - cursorCGY - cellHeight - height
+
+        // X position: offset from left edge of terminal by cursor column
+        let cellWidth = cgFrame.width / CGFloat(terminalCols)
+        let x = cgFrame.minX + CGFloat(cursorCol) * cellWidth
+
+        // Clamp to screen bounds
+        let clampedX = max(screen.visibleFrame.minX, min(x, screen.visibleFrame.maxX - 440))
+        let clampedY = max(screen.visibleFrame.minY, dropdownNSY)
+
+        panel.setFrameOrigin(NSPoint(x: clampedX, y: clampedY))
     }
 
     private func getTerminalWindowFrame() -> CGRect? {
@@ -274,7 +301,13 @@ class StdinReader {
         switch command.action {
         case "show":
             if let items = command.items {
-                controller.show(items: items, selected: command.selected ?? 0)
+                controller.show(
+                    items: items,
+                    selected: command.selected ?? 0,
+                    cursorCol: command.cursorCol,
+                    termRows: command.terminalRows,
+                    termCols: command.terminalCols
+                )
             }
         case "update":
             if let selected = command.selected {
