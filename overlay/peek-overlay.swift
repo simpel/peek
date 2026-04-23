@@ -301,6 +301,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         controller = OverlayWindowController()
         reader = StdinReader(controller: controller)
         reader.start()
+
+        // Hide overlay when user switches to another app
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            // If the newly activated app is NOT a terminal, hide the overlay
+            let terminalBundleIds = [
+                "com.mitchellh.ghostty",
+                "com.googlecode.iterm2",
+                "com.apple.Terminal",
+                "io.alacritty",
+                "net.kovidgoyal.kitty",
+                "dev.warp.Warp-Stable",
+                "com.github.wez.wezterm",
+            ]
+            if let bundleId = app.bundleIdentifier,
+               !terminalBundleIds.contains(bundleId) {
+                self?.controller.hide()
+            }
+        }
     }
 }
 

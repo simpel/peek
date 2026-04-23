@@ -51,11 +51,32 @@ pub fn spawn_shell(shell: &str, cols: u16, rows: u16) -> Result<(RawFd, libc::pi
             let term = CString::new("TERM=xterm-256color").unwrap();
             libc::putenv(term.into_raw());
 
-            // Exec the shell
-            let shell_cstr = CString::new(shell).unwrap();
-            let login_arg = CString::new("-l").unwrap(); // login shell
-            let args = [shell_cstr.as_ptr(), login_arg.as_ptr(), std::ptr::null()];
-            libc::execvp(shell_cstr.as_ptr(), args.as_ptr());
+            // Mark that peek-wrap is active (so shells can detect it)
+            let peek_env = CString::new("PEEK_ACTIVE=1").unwrap();
+            libc::putenv(peek_env.into_raw());
+
+            // For fish: disable built-in completions for tools we manage
+            // by wrapping them with complete --erase before launching
+            let is_fish = shell.contains("fish");
+            if is_fish {
+                let shell_cstr = CString::new(shell).unwrap();
+                let c_flag = CString::new("-C").unwrap();
+                let init_cmd = CString::new(
+                    "complete -e -c pnpm; complete -e -c npm; complete -e -c yarn; complete -e -c bun; complete -e -c make; complete -e -c cargo"
+                ).unwrap();
+                let args = [
+                    shell_cstr.as_ptr(),
+                    c_flag.as_ptr(),
+                    init_cmd.as_ptr(),
+                    std::ptr::null(),
+                ];
+                libc::execvp(shell_cstr.as_ptr(), args.as_ptr());
+            } else {
+                let shell_cstr = CString::new(shell).unwrap();
+                let login_arg = CString::new("-l").unwrap();
+                let args = [shell_cstr.as_ptr(), login_arg.as_ptr(), std::ptr::null()];
+                libc::execvp(shell_cstr.as_ptr(), args.as_ptr());
+            }
 
             // If exec fails
             libc::_exit(1);
