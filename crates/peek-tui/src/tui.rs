@@ -1,6 +1,9 @@
 use std::io::Write;
 
 const MAX_VISIBLE: usize = 8;
+const NAME_W: usize = 20;
+const PREVIEW_W: usize = 28;
+const INNER_W: usize = NAME_W + PREVIEW_W + 3;
 
 pub struct TuiDropdown {
     pub visible: bool,
@@ -58,102 +61,75 @@ impl TuiDropdown {
         self.items.get(self.selected).map(|(n, _)| n.as_str())
     }
 
-    /// Erase the previously rendered dropdown from the terminal.
     pub fn clear(&mut self, w: &mut impl Write) {
         if self.rendered_lines == 0 {
             return;
         }
-        // Save cursor
-        write!(w, "\x1b7").ok();
-        // Move down and clear each rendered line
+        // Move down and clear each line we rendered, then come back
         for _ in 0..self.rendered_lines {
-            write!(w, "\n\x1b[2K").ok();
+            // Move down one line, go to column 1, clear line
+            write!(w, "\x1b[1B\r\x1b[2K").ok();
         }
-        // Move back up
+        // Move back up to original position
         write!(w, "\x1b[{}A", self.rendered_lines).ok();
-        // Restore cursor
-        write!(w, "\x1b8").ok();
+        w.flush().ok();
         self.rendered_lines = 0;
     }
 
-    /// Render the dropdown below the current cursor line.
     pub fn render(&mut self, w: &mut impl Write) {
         if self.items.is_empty() {
             return;
         }
 
         let count = self.items.len().min(MAX_VISIBLE);
-        let name_width = 20;
-        let preview_width = 28;
-        let inner_width = name_width + preview_width + 3; // spaces between
+        let border: String = "-".repeat(INNER_W);
 
-        // Save cursor
-        write!(w, "\x1b7").ok();
+        let mut buf = String::with_capacity(2048);
 
-        // Top border
-        write!(w, "\n\x1b[2K").ok();
-        write!(w, "\x1b[90m ╭").ok();
-        for _ in 0..inner_width {
-            write!(w, "─").ok();
-        }
-        write!(w, "╮\x1b[0m").ok();
+        // Top border: move down 1, clear, draw
+        buf.push_str("\x1b[1B\r\x1b[2K");
+        buf.push_str(&format!(" \x1b[90m+{}+\x1b[0m", border));
 
         // Items
         for i in 0..count {
             let (ref name, ref preview) = self.items[i];
+            let dname = truncate(name, NAME_W);
+            let dprev = truncate(preview, PREVIEW_W);
 
-            let display_name = truncate(name, name_width);
-            let display_preview = truncate(preview, preview_width);
-
-            write!(w, "\n\x1b[2K").ok();
+            buf.push_str("\x1b[1B\r\x1b[2K");
 
             if i == self.selected {
-                // Selected: cyan background, bold name
-                write!(
-                    w,
-                    "\x1b[90m │\x1b[0m\x1b[46;30;1m {:<nw$}\x1b[22m \x1b[90m{:>pw$}\x1b[0m\x1b[46;30m \x1b[0m\x1b[90m│\x1b[0m",
-                    display_name,
-                    display_preview,
-                    nw = name_width,
-                    pw = preview_width,
-                )
-                .ok();
+                buf.push_str(&format!(
+                    " \x1b[90m|\x1b[0m\x1b[7m {:nw$} {:>pw$} \x1b[0m\x1b[90m|\x1b[0m",
+                    dname, dprev, nw = NAME_W, pw = PREVIEW_W,
+                ));
             } else {
-                write!(
-                    w,
-                    "\x1b[90m │\x1b[0m {:<nw$} \x1b[2m{:>pw$}\x1b[0m \x1b[90m│\x1b[0m",
-                    display_name,
-                    display_preview,
-                    nw = name_width,
-                    pw = preview_width,
-                )
-                .ok();
+                buf.push_str(&format!(
+                    " \x1b[90m|\x1b[0m {:nw$} \x1b[2m{:>pw$}\x1b[0m \x1b[90m|\x1b[0m",
+                    dname, dprev, nw = NAME_W, pw = PREVIEW_W,
+                ));
             }
         }
 
         // Bottom border
-        write!(w, "\n\x1b[2K").ok();
-        write!(w, "\x1b[90m ╰").ok();
-        for _ in 0..inner_width {
-            write!(w, "─").ok();
-        }
-        write!(w, "╯\x1b[0m").ok();
+        buf.push_str("\x1b[1B\r\x1b[2K");
+        buf.push_str(&format!(" \x1b[90m+{}+\x1b[0m", border));
 
-        // Total lines = top border + items + bottom border
         self.rendered_lines = count + 2;
 
-        // Restore cursor
-        write!(w, "\x1b8").ok();
+        // Move back up to the original cursor position
+        buf.push_str(&format!("\x1b[{}A", self.rendered_lines));
+
+        w.write_all(buf.as_bytes()).ok();
         w.flush().ok();
     }
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
-    } else if max_len > 3 {
-        format!("{}…", &s[..max_len - 1])
     } else {
-        s[..max_len].to_string()
+        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        format!("{truncated}…")
     }
 }
