@@ -1,6 +1,5 @@
 import Cocoa
 import SwiftUI
-import ApplicationServices
 
 // MARK: - Protocol Types
 
@@ -8,6 +7,10 @@ struct OverlayCommand: Codable {
     let action: String
     let items: [SuggestionItem]?
     let selected: Int?
+    let cursorRow: Int?     // 1-based row in terminal
+    let cursorCol: Int?     // 1-based col in terminal
+    let termRows: Int?
+    let termCols: Int?
 }
 
 struct SuggestionItem: Codable, Identifiable {
@@ -84,48 +87,44 @@ struct VisualEffectView: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = material
-        nsView.blendingMode = blendingMode
-    }
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
-// MARK: - Cursor Position via Accessibility API
+// MARK: - Window Finder
 
-/// Get the screen rect of the text cursor in the focused application.
-/// Uses macOS Accessibility API (AXUIElement) — works for AppKit and
-/// Electron-based terminals (iTerm2, Terminal.app, Hyper, VSCode, etc.)
-func getCursorScreenRect() -> CGRect? {
-    let systemWide = AXUIElementCreateSystemWide()
+/// Find the frontmost normal window that isn't our overlay.
+/// CGWindowList returns windows in front-to-back order.
+/// Window bounds are available WITHOUT Screen Recording permission.
+func getFrontmostWindowFrame() -> CGRect? {
+    let myPid = ProcessInfo.processInfo.processIdentifier
 
-    var focusedElement: AnyObject?
-    let focusResult = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedElement)
-    guard focusResult == .success, let focused = focusedElement else {
+    guard let windowList = CGWindowListCopyWindowInfo(
+        [.optionOnScreenOnly, .excludeDesktopElements],
+        kCGNullWindowID
+    ) as? [[String: Any]] else {
         return nil
     }
 
-    // Try to get the selected text range
-    var rangeValue: AnyObject?
-    let rangeResult = AXUIElementCopyAttributeValue(focused as! AXUIElement, kAXSelectedTextRangeAttribute as CFString, &rangeValue)
-    guard rangeResult == .success, let range = rangeValue else {
-        return nil
-    }
+    for window in windowList {
+        guard let layer = window[kCGWindowLayer as String] as? Int,
+              layer == 0,
+              let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+              let pid = window[kCGWindowOwnerPID as String] as? Int32,
+              pid != myPid
+        else { continue }
 
-    // Get the screen bounds for that text range
-    var boundsValue: AnyObject?
-    let boundsResult = AXUIElementCopyParameterizedAttributeValue(
-        focused as! AXUIElement,
-        kAXBoundsForRangeParameterizedAttribute as CFString,
-        range,
-        &boundsValue
-    )
-    guard boundsResult == .success, let bounds = boundsValue else {
-        return nil
-    }
+        let w = bounds["Width"] ?? 0
+        let h = bounds["Height"] ?? 0
 
-    var rect = CGRect.zero
-    if AXValueGetValue(bounds as! AXValue, .cgRect, &rect) {
-        return rect
+        // Skip tiny windows (menu bar items, etc.)
+        if w > 200 && h > 200 {
+            return CGRect(
+                x: bounds["X"] ?? 0,
+                y: bounds["Y"] ?? 0,
+                width: w,
+                height: h
+            )
+        }
     }
     return nil
 }
@@ -140,7 +139,6 @@ class OverlayPanel: NSPanel {
 class OverlayWindowController {
     let panel: OverlayPanel
     let state: OverlayState
-    var hostingView: NSHostingView<DropdownView>?
 
     init() {
         state = OverlayState()
@@ -163,10 +161,9 @@ class OverlayWindowController {
         hosting.frame = panel.contentView!.bounds
         hosting.autoresizingMask = [.width, .height]
         panel.contentView?.addSubview(hosting)
-        hostingView = hosting
     }
 
-    func show(items: [SuggestionItem], selected: Int) {
+    func show(items: [SuggestionItem], selected: Int, cursorRow: Int, cursorCol: Int, termRows: Int, termCols: Int) {
         DispatchQueue.main.async { [self] in
             state.items = items
             state.selectedIndex = selected
@@ -178,20 +175,27 @@ class OverlayWindowController {
 
             panel.setContentSize(NSSize(width: 440, height: height))
 
-            // Use Accessibility API to get cursor position
-            if let cursorRect = getCursorScreenRect() {
+            // Position using frontmost window frame + cursor position
+            if let winFrame = getFrontmostWindowFrame() {
                 let screenHeight = NSScreen.main?.frame.height ?? 1080
-                // cursorRect is in CG coordinates (top-left origin)
+                let titleBar: CGFloat = 28
+                let contentH = winFrame.height - titleBar
+                let cellH = contentH / CGFloat(termRows)
+                let cellW = winFrame.width / CGFloat(termCols)
+
+                // CG coordinates (top-left origin)
+                let cursorBottomCG = winFrame.minY + titleBar + CGFloat(cursorRow) * cellH
+
                 // Convert to NS coordinates (bottom-left origin)
-                let nsX = cursorRect.origin.x
-                let nsY = screenHeight - cursorRect.origin.y - cursorRect.height - height
-                panel.setFrameOrigin(NSPoint(x: nsX, y: nsY))
-            } else {
-                // Fallback: center of screen
-                if let screen = NSScreen.main {
-                    let f = screen.visibleFrame
-                    panel.setFrameOrigin(NSPoint(x: f.midX - 220, y: f.midY))
-                }
+                let nsY = screenHeight - cursorBottomCG - height
+                let nsX = winFrame.minX + CGFloat(cursorCol - 1) * cellW
+
+                // Clamp to screen
+                let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1920, height: 1080)
+                let clampedX = max(screen.minX, min(nsX, screen.maxX - 440))
+                let clampedY = max(screen.minY, nsY)
+
+                panel.setFrameOrigin(NSPoint(x: clampedX, y: clampedY))
             }
 
             panel.orderFrontRegardless()
@@ -231,9 +235,7 @@ class StdinReader {
             while true {
                 let data = handle.availableData
                 if data.isEmpty {
-                    DispatchQueue.main.async {
-                        NSApplication.shared.terminate(nil)
-                    }
+                    DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
                     break
                 }
 
@@ -243,8 +245,7 @@ class StdinReader {
                     let lineData = buffer.subdata(in: buffer.startIndex..<newlineRange.lowerBound)
                     buffer.removeSubrange(buffer.startIndex...newlineRange.lowerBound)
 
-                    if let line = String(data: lineData, encoding: .utf8),
-                       !line.isEmpty {
+                    if let line = String(data: lineData, encoding: .utf8), !line.isEmpty {
                         processCommand(line)
                     }
                 }
@@ -254,19 +255,22 @@ class StdinReader {
 
     private func processCommand(_ json: String) {
         guard let data = json.data(using: .utf8),
-              let command = try? JSONDecoder().decode(OverlayCommand.self, from: data) else {
-            return
-        }
+              let cmd = try? JSONDecoder().decode(OverlayCommand.self, from: data) else { return }
 
-        switch command.action {
+        switch cmd.action {
         case "show":
-            if let items = command.items {
-                controller.show(items: items, selected: command.selected ?? 0)
+            if let items = cmd.items {
+                controller.show(
+                    items: items,
+                    selected: cmd.selected ?? 0,
+                    cursorRow: cmd.cursorRow ?? 1,
+                    cursorCol: cmd.cursorCol ?? 1,
+                    termRows: cmd.termRows ?? 24,
+                    termCols: cmd.termCols ?? 80
+                )
             }
         case "update":
-            if let selected = command.selected {
-                controller.updateSelection(selected)
-            }
+            if let sel = cmd.selected { controller.updateSelection(sel) }
         case "hide":
             controller.hide()
         default:
@@ -288,26 +292,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         reader = StdinReader(controller: controller)
         reader.start()
 
-        // Hide overlay when user switches to a non-terminal app
+        // Hide when user switches away from terminal
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            let bundleId = app.bundleIdentifier ?? ""
-            // Hide unless the activated app is the terminal or our own overlay
-            let keepVisible = bundleId.contains("term") ||
-                            bundleId.contains("iterm") ||
-                            bundleId.contains("ghostty") ||
-                            bundleId.contains("hyper") ||
-                            bundleId.contains("kitty") ||
-                            bundleId.contains("alacritty") ||
-                            bundleId.contains("wezterm") ||
-                            bundleId.contains("warp")
-            if !keepVisible {
-                self?.controller.hide()
-            }
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.controller.hide()
         }
     }
 }
