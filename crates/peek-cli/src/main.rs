@@ -22,7 +22,7 @@ fn pid_path() -> PathBuf {
 }
 
 #[derive(Parser)]
-#[command(name = "peek", about = "Inline shell autocomplete daemon")]
+#[command(name = "peek", about = "Inline shell autocomplete daemon", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -178,6 +178,10 @@ fn main() -> Result<()> {
         }
 
         Commands::Status => {
+            println!("peek v{}", env!("CARGO_PKG_VERSION"));
+            println!();
+
+            // Daemon status
             match send_request(&Request::Status) {
                 Ok(Response::Status {
                     pid,
@@ -187,17 +191,41 @@ fn main() -> Result<()> {
                     let hours = uptime_secs / 3600;
                     let minutes = (uptime_secs % 3600) / 60;
                     let seconds = uptime_secs % 60;
-                    println!("peek daemon is running");
-                    println!("  PID: {pid}");
-                    println!("  Uptime: {hours}h {minutes}m {seconds}s");
-                    println!("  Watched directories: {}", watched_dirs.len());
-                    for dir in &watched_dirs {
-                        println!("    {dir}");
-                    }
+                    println!("Daemon:  running (PID {pid}, uptime {hours}h {minutes}m {seconds}s)");
+                    println!("Watched: {} directories", watched_dirs.len());
                 }
                 _ => {
-                    println!("peek daemon is not running");
+                    println!("Daemon:  not running");
                 }
+            }
+
+            // Shell hook status
+            let shell = std::env::var("SHELL").unwrap_or_default();
+            let rc_path = if shell.contains("fish") {
+                dirs::home_dir().unwrap().join(".config/fish/config.fish")
+            } else if shell.contains("zsh") {
+                dirs::home_dir().unwrap().join(".zshrc")
+            } else {
+                dirs::home_dir().unwrap().join(".bashrc")
+            };
+
+            let shell_name = if shell.contains("fish") {
+                "fish"
+            } else if shell.contains("zsh") {
+                "zsh"
+            } else {
+                "bash"
+            };
+
+            let hook_installed = rc_path.exists()
+                && std::fs::read_to_string(&rc_path)
+                    .map(|c| c.contains("peek init"))
+                    .unwrap_or(false);
+
+            if hook_installed {
+                println!("Shell:   {shell_name} (hooks installed in {})", rc_path.display());
+            } else {
+                println!("Shell:   {shell_name} (hooks NOT installed - run `peek setup`)");
             }
         }
 
