@@ -128,6 +128,10 @@ jobs:
               prefix.install "com.peek.daemon.plist"
             end
 
+            def post_install
+              system bin/"peek", "setup"
+            end
+
             service do
               run [opt_bin/"peekd"]
               keep_alive true
@@ -137,13 +141,8 @@ jobs:
 
             def caveats
               <<~EOS
-                Run the setup command to activate peek in your shell:
-                  peek setup
-
-                This adds shell hooks to your config file (fish/zsh/bash).
-                Restart your terminal after setup.
-
-                The peek daemon starts automatically when needed.
+                peek has been added to your shell config.
+                Restart your terminal to activate.
               EOS
             end
 
