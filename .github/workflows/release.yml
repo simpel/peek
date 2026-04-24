@@ -134,10 +134,6 @@ jobs:
               prefix.install "com.peek.daemon.plist"
             end
 
-            def post_install
-              system bin/"peek", "setup"
-            end
-
             service do
               run [opt_bin/"peekd"]
               keep_alive true
@@ -147,8 +143,10 @@ jobs:
 
             def caveats
               <<~EOS
-                peek has been added to your shell config.
-                Restart your terminal to activate.
+                To activate peek, run:
+                  peek setup
+
+                Then restart your terminal.
               EOS
             end
 
