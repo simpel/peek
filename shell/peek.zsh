@@ -44,6 +44,7 @@ _peek_ensure_daemon() {
 # --- Directory Change Hook ---
 _peek_chpwd() {
   PEEK_BIN _cd --cwd "$PWD" &>/dev/null &
+  disown
 }
 autoload -Uz add-zsh-hook
 add-zsh-hook chpwd _peek_chpwd
@@ -58,6 +59,7 @@ _peek_preexec() {
       local command="${rest%% *}"
       local tool="${p%% *}"
       PEEK_BIN _executed --cwd "$PWD" --command "$command" --tool "$tool" &>/dev/null &
+      disown
       break
     fi
   done
