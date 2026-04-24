@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "peek-cli"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "peek-core"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "nucleo",
@@ -663,11 +663,11 @@ dependencies = [
 
 [[package]]
 name = "peek-shell"
-version = "1.2.3"
+version = "1.2.4"
 
 [[package]]
 name = "peek-tui"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "peekd"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "dirs",
