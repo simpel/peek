@@ -65,6 +65,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Set version in Cargo.toml
+        run: |
+          sed -i 's/^version = ".*"/version = "${{ needs.semantic-release.outputs.version }}"/' Cargo.toml
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
