@@ -26,13 +26,15 @@ _peek_complete() {
   _describe 'script' completions
 }
 
-# Register completions for managed tools
-compdef _peek_complete pnpm
-compdef _peek_complete npm
-compdef _peek_complete yarn
-compdef _peek_complete bun
-compdef _peek_complete make
-compdef _peek_complete cargo
+# Register completions for managed tools (guard for missing compinit)
+if type compdef &>/dev/null; then
+  compdef _peek_complete pnpm
+  compdef _peek_complete npm
+  compdef _peek_complete yarn
+  compdef _peek_complete bun
+  compdef _peek_complete make
+  compdef _peek_complete cargo
+fi
 
 # --- Daemon ---
 _peek_ensure_daemon() {

@@ -289,45 +289,74 @@ fn main() -> Result<()> {
         }
 
         Commands::Setup => {
-            let shell = std::env::var("SHELL").unwrap_or_default();
             let peek_bin = std::env::current_exe()
                 .unwrap_or_else(|_| PathBuf::from("peek"));
             let peek_path = peek_bin.to_string_lossy();
+            let home = dirs::home_dir().expect("could not determine home directory");
 
-            let (rc_path, snippet) = if shell.contains("fish") {
+            // Install hooks for all shells that have config files or are $SHELL
+            let shells: Vec<(&str, PathBuf, String)> = vec![
                 (
-                    dirs::home_dir().unwrap().join(".config/fish/config.fish"),
+                    "fish",
+                    home.join(".config/fish/config.fish"),
                     format!("# peek - inline autocomplete\n{peek_path} init fish | source\n"),
-                )
-            } else if shell.contains("zsh") {
+                ),
                 (
-                    dirs::home_dir().unwrap().join(".zshrc"),
+                    "zsh",
+                    home.join(".zshrc"),
                     format!("# peek - inline autocomplete\neval \"$({peek_path} init zsh)\"\n"),
-                )
-            } else {
+                ),
                 (
-                    dirs::home_dir().unwrap().join(".bashrc"),
+                    "bash",
+                    home.join(".bashrc"),
                     format!("# peek - inline autocomplete\neval \"$({peek_path} init bash)\"\n"),
-                )
-            };
+                ),
+            ];
 
-            if rc_path.exists() {
-                let content = std::fs::read_to_string(&rc_path)?;
-                if content.contains("peek init") {
-                    println!("peek is already set up in {}", rc_path.display());
-                    return Ok(());
+            let current_shell = std::env::var("SHELL").unwrap_or_default();
+            let mut installed = false;
+
+            for (name, rc_path, snippet) in &shells {
+                // Install if: the config file exists, OR this is the user's $SHELL
+                let should_install = rc_path.exists() || current_shell.contains(name);
+                if !should_install {
+                    continue;
                 }
+
+                // Skip if already installed
+                if rc_path.exists() {
+                    let content = std::fs::read_to_string(rc_path)?;
+                    if content.contains("peek init") {
+                        println!("{name}: already set up ({})", rc_path.display());
+                        installed = true;
+                        continue;
+                    }
+                }
+
+                // Ensure parent directory exists (for fish)
+                if let Some(parent) = rc_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(rc_path)?;
+                file.write_all(b"\n")?;
+                file.write_all(snippet.as_bytes())?;
+
+                println!("{name}: added to {}", rc_path.display());
+                installed = true;
             }
 
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&rc_path)?;
-            file.write_all(b"\n")?;
-            file.write_all(snippet.as_bytes())?;
-
-            println!("Added to {}", rc_path.display());
-            println!("Restart your terminal to activate.");
+            if installed {
+                println!("\nRestart your terminal to activate.");
+            } else {
+                println!("No shell config files found. Add manually:");
+                println!("  fish: {peek_path} init fish | source");
+                println!("  zsh:  eval \"$({peek_path} init zsh)\"");
+                println!("  bash: eval \"$({peek_path} init bash)\"");
+            }
         }
 
         Commands::Unsetup => {
